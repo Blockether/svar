@@ -1,4 +1,7 @@
 {:paths ["src/clj" "src/java" "resources" "target/classes"]
+ :deps/prep-lib {:alias :build
+                 :fn compile-java
+                 :ensure "target/classes/com/blockether/svar/JsonishParser.class"}
 
  :deps {;; Anomaly - standardized error categories
         com.blockether/anomaly    {:mvn/version "1.0.1"}

@@ -5,6 +5,7 @@
             [charred.api :as json]
             [clojure.string :as str]
             [com.blockether.anomaly.core :as anomaly]
+            [com.blockether.svar.internal.anthropic-threads :as threads]
             [com.blockether.svar.internal.jsonish :as jsonish]
             [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.router :as router]
@@ -1207,9 +1208,15 @@
         redacted?
         (:redacted? block)]
 
-    (cond redacted? {:type "redacted_thinking" :data thinking-signature}
+    (cond redacted? (-> block
+                        (dissoc :thinking :thinking-signature :redacted?)
+                        (assoc :type "redacted_thinking"
+                               :data thinking-signature))
           (and (string? thinking-signature) (not (str/blank? thinking-signature)))
-          {:type "thinking" :thinking (or thinking "") :signature thinking-signature}
+          (-> block
+              (dissoc :thinking-signature :redacted?)
+              (assoc :thinking (or thinking "")
+                     :signature thinking-signature))
           :else {:type "text" :text (or thinking "")})))
 
 (defn- demote-interior-thinking-blocks
@@ -1299,7 +1306,7 @@
     (if (or has-thinking?
             (not= 1 (count wire))
             (not (text-block? (first wire)))
-            (some? (:cache_control (first wire))))
+            (seq (dissoc (first wire) :type :text)))
       wire
       (-> wire
           first
@@ -2001,40 +2008,41 @@
         {:api-key api-key :base-url base-url :provider-id provider-id :llm-headers llm-headers}))))
 
 (defn- anthropic-wire->canonical-block
-  "Translates one Anthropic wire content block to svar's canonical
-   shape. `text` blocks become `{:type \"text\" :text str}`; `thinking`
-   blocks become canonical thinking blocks carrying the HMAC signature
-   in `:thinking-signature`; `redacted_thinking` blocks become
-   canonical thinking blocks with `:redacted? true` and the encrypted
-   data carried under `:thinking-signature`. Anything else passes
-   through unchanged so future Anthropic block types (tool_use,
-   server_tool_use, ...) survive a round-trip."
+  "Preserve Anthropic fields while normalizing the canonical block keys."
   [block]
-  (case (get block "type")
-    "text"
-    {:type "text" :text (or (get block "text") "")}
+  (let [canonical (into {}
+                        (map (fn [[k v]]
+                               [(keyword k) v]))
+                        block)]
+    (case (:type canonical)
+      "text"
+      (update canonical :text #(or % ""))
 
-    "thinking"
-    {:type "thinking"
-     :thinking (or (get block "thinking") "")
-     :thinking-signature (or (get block "signature") "")
-     :redacted? false}
+      "thinking"
+      (-> canonical
+          (dissoc :signature)
+          (assoc :thinking (or (:thinking canonical) "")
+                 :thinking-signature (or (:signature canonical) "")
+                 :redacted? false))
 
-    "redacted_thinking"
-    {:type "thinking" :thinking "" :thinking-signature (or (get block "data") "") :redacted? true}
+      "redacted_thinking"
+      (-> canonical
+          (dissoc :data)
+          (assoc :type "thinking"
+                 :thinking ""
+                 :thinking-signature (or (:data canonical) "")
+                 :redacted? true))
 
-    ;; Streaming accumulates a tool_use block's args under :partial_json (the
-    ;; raw input_json_delta concat); non-streaming delivers a parsed :input.
-    ;; Normalize both to a canonical `{:type tool_use :id :name :input}`.
-    "tool_use"
-    {:type "tool_use"
-     :id (get block "id")
-     :name (get block "name")
-     :input (let [pj (get block "partial_json")]
-              (decode-tool-arguments
-                (if (and (string? pj) (not (str/blank? pj))) pj (get block "input"))))}
+      ("tool_use" "server_tool_use")
+      (-> canonical
+          (dissoc :partial_json)
+          (assoc :input (let [partial (:partial_json canonical)]
+                          (decode-tool-arguments (if (and (string? partial)
+                                                          (not (str/blank? partial)))
+                                                   partial
+                                                   (:input canonical))))))
 
-    block))
+      canonical)))
 
 (defn- anthropic-canonical-assistant-message
   "Builds the canonical `:assistant-message` for an Anthropic response.
@@ -2096,13 +2104,16 @@
                       :input (decode-tool-arguments (get b "input"))})))
 
         canonical-msg
-        (anthropic-canonical-assistant-message content-blocks)]
+        (or (anthropic-canonical-assistant-message content-blocks)
+            (when (= "pause_turn" (get response "stop_reason")) {:role "assistant" :content []}))]
 
     (cond-> {:content visible
              :reasoning (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
              ;; Phase A canonical usage shape — :input-tokens always
              ;; TOTAL (anthropic-additive raw values are summed here).
              :api-usage (usage/anthropic-canonical usage)
+             :stream-finalization {:finish-reason (get response "stop_reason")
+                                   :stop-details (get response "stop_details")}
              :http-response envelope}
       (seq tool-calls)
       (assoc :tool-calls tool-calls)
@@ -2149,6 +2160,10 @@
             "text_delta"
             (do (swap! pending update-in [idx "text"] (fnil str "") (get delta "text"))
                 {:content-delta (get delta "text") :reasoning-delta nil :api-usage nil})
+
+            "citations_delta"
+            (do (swap! pending update-in [idx "citations"] (fnil conj []) (get delta "citation"))
+                {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx "thinking"] (fnil str "") (get delta "thinking"))
@@ -2198,12 +2213,18 @@
         "message_delta"
         {:content-delta nil
          :reasoning-delta nil
-         :api-usage (usage/anthropic-canonical (get chunk "usage"))}
+         :api-usage (usage/anthropic-canonical (get chunk "usage"))
+         :provider-state {:provider :anthropic
+                          :stop-reason (get-in chunk ["delta" "stop_reason"])
+                          :fallback? (boolean (some #(or (get % "fallback_message")
+                                                         (= "fallback_message" (get % "type")))
+                                                    (get-in chunk ["usage" "iterations"])))}}
 
         "message_start"
         {:content-delta nil
          :reasoning-delta nil
-         :api-usage (usage/anthropic-canonical (get-in chunk ["message" "usage"]))}
+         :api-usage (usage/anthropic-canonical (get-in chunk ["message" "usage"]))
+         :provider-state {:provider :anthropic :id (get-in chunk ["message" "id"])}}
 
         "message_stop"
         {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
@@ -3894,6 +3915,16 @@
   "When bound, intercepts one OpenAI Codex Responses call with an explicit
    session transport. Ordinary routed calls remain on HTTP/SSE."
   nil)
+
+(def ^:dynamic *anthropic-session-transport*
+  "When bound, send Anthropic requests through a sequential thread session."
+  nil)
+
+(defn- session-chat-completion!
+  [api-style body headers send!]
+  (if (and (= :anthropic api-style) *anthropic-session-transport*)
+    (*anthropic-session-transport* body headers send!)
+    (send! body headers)))
 
 (defn- responses-websocket-url
   [base-url responses-path]
@@ -5679,8 +5710,12 @@
                       ;; :status}. `extract-fn` knows how to unwrap it and, crucially,
                       ;; re-emit it under :http-response so callers higher up can
                       ;; attach the raw response to error ex-data (see `ask!*`).
-                      (let [envelope (http-post! chat-url request-body headers timeout-ms)]
-                        (extract-fn envelope))
+                      (session-chat-completion!
+                        api-style
+                        request-body
+                        headers
+                        (fn [body request-headers]
+                          (extract-fn (http-post! chat-url body request-headers timeout-ms))))
                       (catch clojure.lang.ExceptionInfo e
                         (when-let [body (:body (ex-data e))]
                           (trove/log! {:level :warn
@@ -5694,6 +5729,7 @@
                         (throw e))))
                   retry-opts)
       (catch Exception e
+        (when (= :svar.session/invalid-input (:type (ex-data e))) (throw e))
         ;; Check for API key configuration errors
         (let [ex-data-map
               (ex-data e)
@@ -6762,6 +6798,7 @@
                        (when-let [sd (stream-stop-details parsed)]
                          (reset! stop-details sd))
                        (when (and (not @terminal-event)
+                                  (not= "message_delta" (stream-event-type parsed))
                                   (not (contains? nonterminal-stream-statuses finish-reason)))
                          (reset! terminal-event {:kind :finish-reason
                                                  :event-type (stream-event-type parsed)})))
@@ -7078,7 +7115,8 @@
             assistant-msg
             (case (:provider ps)
               :anthropic
-              (when (seq (:blocks ps)) {:role "assistant" :content (vec (:blocks ps))})
+              (when (or (seq (:blocks ps)) (= "pause_turn" (:stop-reason ps)))
+                {:role "assistant" :content (vec (:blocks ps))})
 
               :openai-responses
               (responses-extract-assistant-message (:reasoning-items ps) final-content)
@@ -7311,13 +7349,7 @@
 
         headers
         (merge (request-headers api-style api-key provider-id messages llm-headers extra-body)
-               {"Accept" "text/event-stream"})
-
-        ;; Anthropic uses a stateful closure so per-block
-        ;; signature/text accumulation survives the SSE event boundary.
-        ;; Other providers stay on the stateless extractor.
-        delta-fn
-        (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)]
+               {"Accept" "text/event-stream"})]
 
     (try
       (with-retry (fn []
@@ -7327,28 +7359,33 @@
                               *stream-first-byte-timeout-ms*
                               first-byte-timeout-ms]
 
-                      (http-post-stream!
-                        chat-url
+                      (session-chat-completion!
+                        api-style
                         request-body
                         headers
-                        timeout-ms
-                        ttft-timeout-ms
-                        idle-timeout-ms
-                        delta-fn
-                        (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
-                                     provider-state api-usage thinking-alive?]}]
-                          (on-chunk (cond-> {:content content-acc
-                                             :reasoning (nonblank-str reasoning-acc)
-                                             :tool-input (nonblank-str tool-args-acc)
-                                             :tool-call-preview tool-call-preview
-                                             :provider-state provider-state
-                                             :api-usage api-usage
-                                             :done? false}
-                                      thinking-alive?
-                                      (assoc :thinking-alive? true)))))))
+                        (fn [body request-headers]
+                          (http-post-stream!
+                            chat-url
+                            body
+                            request-headers
+                            timeout-ms
+                            ttft-timeout-ms
+                            idle-timeout-ms
+                            (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)
+                            (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
+                                         provider-state api-usage thinking-alive?]}]
+                              (on-chunk (cond-> {:content content-acc
+                                                 :reasoning (nonblank-str reasoning-acc)
+                                                 :tool-input (nonblank-str tool-args-acc)
+                                                 :tool-call-preview tool-call-preview
+                                                 :provider-state provider-state
+                                                 :api-usage api-usage
+                                                 :done? false}
+                                          thinking-alive?
+                                          (assoc :thinking-alive? true)))))))))
                   retry-opts)
       (catch Exception e
-        (if (stream-finalization-error? e)
+        (if (or (stream-finalization-error? e) (= :svar.session/invalid-input (:type (ex-data e))))
           (throw e)
           (let [ex-data-map
                 (ex-data e)
@@ -10343,6 +10380,7 @@
             (ask-code!* router
                         (-> routed
                             (dissoc :on-chunk :on-empty-reply-resend :check-context?)
+                            (update :extra-body dissoc :thread)
                             (assoc :svar/prompt-cache-warm? true)))))))))
 
 ;; =============================================================================
@@ -10438,8 +10476,40 @@
          (mapcat #(responses-message-input-entries % explicit-cache?))
          vec)))
 
+(defn- session-backend
+  [provider model-map]
+  (let [api-style (or (:api-style model-map) (:api-style provider))]
+    (cond (and (= :openai-codex (:id provider)) (= :openai-compatible-responses api-style))
+          :responses-websocket
+          (and (= :anthropic api-style)
+               (= :anthropic (:id provider))
+               (not (anthropic-oauth-token? (:api-key provider))))
+          :anthropic-message-threads)))
+
+(defn session-capability
+  "Return session support for the effective route. Anthropic auto-open requires thread.type=create.
+   An explicit open-session call is also an opt-in. Threads are not ZDR eligible."
+  [router opts]
+  (let [resolved
+        (router/resolve-routing router (routing-opts-with-reasoning opts))
+
+        [provider model-map]
+        (router/select-provider router (:prefs resolved))
+
+        backend
+        (session-backend provider model-map)]
+
+    (when backend
+      {:provider-id (:id provider)
+       :model (:name model-map)
+       :backend backend
+       :auto-open? (or (= :responses-websocket backend)
+                       (= "create"
+                          (get-in (inject-routed-params opts provider model-map)
+                                  [:extra-body :thread :type])))})))
+
 (defn- session-call-route
-  [router base-opts turn-opts provider-id]
+  [router base-opts turn-opts provider-id backend]
   (let [turn-routing
         (:routing turn-opts)
 
@@ -10477,15 +10547,17 @@
           api-style
           (or (:api-style model-map) (:api-style provider))]
 
-      (when-not (and (= provider-id selected-provider) (= :openai-compatible-responses api-style))
-        (throw (ex-info "A session turn must remain on its Codex Responses provider."
+      (when-not (and (= provider-id selected-provider)
+                     (= backend (session-backend provider model-map)))
+        (throw (ex-info "A session turn must remain on its provider and transport."
                         {:type :svar.session/provider-switch
                          :provider provider-id
                          :requested-provider selected-provider
                          :api-style api-style})))
       [(:name model-map) (assoc call-opts :routing (assoc routing :model (:name model-map)))])))
 
-(defrecord ResponsesSession [router base-opts provider-id history transport-state closed? lock]
+(defrecord ProviderSession [router base-opts provider-id backend history transport-state closed?
+                            lock]
   StatefulSession
     (-ask-session! [_ input]
       (locking lock
@@ -10494,7 +10566,7 @@
               (sync-session-turn (session-turn input) @history)
 
               [active-model call-opts]
-              (session-call-route router base-opts turn-opts provider-id)
+              (session-call-route router base-opts turn-opts provider-id backend)
 
               prior-transport
               @transport-state
@@ -10519,7 +10591,12 @@
 
               call-opts
               (assoc call-opts
-                :messages full-messages
+                :messages (if (and (= :anthropic-message-threads backend)
+                                   (:prompt-cache-options call-opts))
+                            (place-prompt-cache-breakpoints full-messages
+                                                            provider-id
+                                                            (:prompt-cache-options call-opts))
+                            full-messages)
                 ;; Session close is cancellation for an in-flight request. Combine
                 ;; that lifecycle signal with the caller hook rather than creating
                 ;; a second retry/cancellation loop.
@@ -10550,25 +10627,48 @@
                 (assoc :session-reset? true))
 
               result
-              (do (swap! transport-state assoc :request-active? true)
-                  (try (binding [*responses-session-transport*
-                                 (fn [request-body completion-opts fallback!]
-                                   (responses-session-completion!
-                                     transport-state
-                                     request-body
-                                     ;; The endpoint this body was just built for
-                                     ;; decides the delta's cache markers too, and a
-                                     ;; self-heal retry rebuilds the delta with it.
-                                     (messages->responses-input full-messages
-                                                                (count new-messages)
-                                                                active-model
-                                                                (responses-explicit-cache?
-                                                                  provider-id
-                                                                  (:base-url completion-opts)))
-                                     (merge completion-opts session-opts)
-                                     fallback!))]
-                         (ask-code! router call-opts))
-                       (finally (swap! transport-state dissoc :request-active?))))
+              (do
+                (swap! transport-state assoc :request-active? true)
+                (try (binding [*responses-session-transport*
+                               (fn [request-body completion-opts fallback!]
+                                 (responses-session-completion! transport-state
+                                                                request-body
+                                                                ;; The endpoint this body was just built for
+                                                                ;; decides the delta's cache markers too, and a
+                                                                ;; self-heal retry rebuilds the delta with it.
+                                                                (messages->responses-input
+                                                                  full-messages
+                                                                  (count new-messages)
+                                                                  active-model
+                                                                  (responses-explicit-cache?
+                                                                    provider-id
+                                                                    (:base-url completion-opts)))
+                                                                (merge completion-opts session-opts)
+                                                                fallback!))
+
+                               *anthropic-session-transport*
+                               (when (= :anthropic-message-threads backend)
+                                 (fn [body headers send!]
+                                   (threads/complete! transport-state
+                                                      body
+                                                      headers
+                                                      send!
+                                                      {:delta-count (count (remove #(= "system"
+                                                                                       (some->
+                                                                                         (:role %)
+                                                                                         name))
+                                                                             new-messages))
+                                                       :reset? replace-history?})))]
+
+                       (let [result (ask-code! router call-opts)]
+                         (when (= :anthropic-message-threads backend)
+                           (threads/accept! transport-state))
+                         result))
+                     (catch Throwable error
+                       (when (= :anthropic-message-threads backend)
+                         (threads/discard! transport-state))
+                       (throw error))
+                     (finally (swap! transport-state dissoc :request-active?))))
 
               assistant-message
               (or (:assistant-message result)
@@ -10586,8 +10686,9 @@
       (when (compare-and-set! closed? false true)
         ;; Idle shutdown is polite; an active response is cancellation and follows
         ;; Codex by aborting the stream immediately instead of awaiting a close ACK.
-        (close-session-socket! transport-state
-                               (if (:request-active? @transport-state) :abort :graceful)))
+        (when (= :responses-websocket backend)
+          (close-session-socket! transport-state
+                                 (if (:request-active? @transport-state) :abort :graceful))))
       nil)
     (-session-history [_] @history)
     (-session-status [_]
@@ -10599,7 +10700,9 @@
               (router/prompt-cache-status router (:cache-key base-opts) provider-id model))]
 
         (cond-> {:provider-id provider-id
-                 :transport (session-transport-status transport-state @closed?)}
+                 :transport (if (= :anthropic-message-threads backend)
+                              (threads/status current @closed?)
+                              (session-transport-status transport-state @closed?))}
           cache-status
           (assoc :prompt-cache cache-status))))
   Closeable
@@ -10607,7 +10710,11 @@
 
 (defn open-session
   "Opens an explicit, sequential LLM session. The public contract is provider
-   neutral; the first stateful backend is `:openai-codex`, using one Responses
+   neutral. Direct Anthropic sessions use Message Threads over HTTP/SSE.
+   Threads expire after five idle minutes and replay from local history. They are not
+   ZDR eligible. Unsupported thread requests fall back to ordinary full-history calls.
+   `:prompt-cache-options` places cache markers after canonical history synchronization.
+   The `:openai-codex` backend uses one Responses
    WebSocket plus `previous_response_id`. Canonical history remains local and is
    replayed after reconnect. The ChatGPT backend routes cache affinity by the
    `session-id` header, not by `prompt_cache_key`, so the session sends its cache
@@ -10654,24 +10761,29 @@
         cache-key
         (or (:cache-key opts) (str "svar-session-" (java.util.UUID/randomUUID)))
 
-        base-opts
-        (-> (dissoc opts :messages)
-            (assoc :cache-key cache-key
-                   :websocket-prewarm? (true? (:websocket-prewarm? opts))
-                   :llm-headers (merge {"session-id" cache-key} (:llm-headers opts))))]
+        backend
+        (session-backend provider model-map)
 
-    (when-not (and (= :openai-codex provider-id) (= :openai-compatible-responses api-style))
-      (throw (ex-info "Stateful sessions currently require the OpenAI Codex Responses provider."
+        base-opts
+        (cond-> (assoc (dissoc opts :messages) :cache-key cache-key)
+          (= :responses-websocket backend)
+          (assoc :websocket-prewarm?
+            (true? (:websocket-prewarm? opts)) :llm-headers
+            (merge {"session-id" cache-key} (:llm-headers opts))))]
+
+    (when-not backend
+      (throw (ex-info "Stateful sessions require Codex Responses or an Anthropic provider."
                       {:type :svar.session/unsupported-provider
                        :provider provider-id
                        :api-style api-style})))
-    (->ResponsesSession router
-                        base-opts
-                        provider-id
-                        (atom (vec (:messages opts)))
-                        (atom {})
-                        (atom false)
-                        (Object.))))
+    (->ProviderSession router
+                       base-opts
+                       provider-id
+                       backend
+                       (atom (vec (:messages opts)))
+                       (atom {})
+                       (atom false)
+                       (Object.))))
 
 (defn close-session!
   "Closes an explicit session. Idle transports close gracefully; active turns abort. Idempotent."

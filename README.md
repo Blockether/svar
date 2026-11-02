@@ -39,6 +39,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 | [**Structured Output**](#schemaless-adaptive-parsing-ask) | `ask!` | LLM → validated Clojure map via spec. Works with any text-producing LLM — SAP parser handles malformed JSON, unquoted keys, trailing commas, markdown blocks. Supports [streaming](#streaming) via `:on-chunk`. Token counting + cost estimation via JTokkit. |
 | [**Tool Calling**](#tool-calling-ask-code) | `ask-code!` | Native tool-calling completion. The model acts by calling your tools (`tool_use` / `tool_calls` / `function_call` — shaped per wire); no tool call means its text IS the final answer. Supports [streaming](#streaming) via `:on-chunk`. |
 | [**Stateful Codex Sessions**](#stateful-codex-sessions-open-session) | `open-session`, `ask!`, `close-session!`, `session-history`, `session-status` | Persistent Responses WebSocket, delta-only turns, server continuation, canonical replay fallback, and provider-safe transport telemetry for `:openai-codex`. |
+| [**Anthropic Threads**](#anthropic-message-threads-open-session) | `open-session`, `session-capability` | HTTP/SSE continuation with local history, bounded replay, and independent prompt caching. |
 | [**Spec DSL**](#spec-dsl-reference) | `spec`, `field`, `spec->prompt`, `validate-data` | Define output shapes: types, enums, refs, optional fields, namespaced keys, fixed-size vectors. |
 | [**Parsing**](#parsing--validation) | `str->data`, `str->data-with-spec`, `data->str` | Schemaless and spec-validated JSON↔Clojure. Handles malformed JSON out of the box. |
 | [**Models**](#available-models-models) | `models!` | List available models from your provider. |
@@ -340,7 +341,36 @@ Svar still owns canonical history. Cursorless WebSocket requests have no default
 
 For other terminal WebSocket errors, Svar aborts the physical stream immediately. A rejected cursor opens a fresh socket and replays the whole history, while a dropped connection uses the same fresh-socket replay up to `:websocket-max-retries` times (default 5, waits tuned by `:websocket-retry-delay-ms`). When that ladder is spent - or the endpoint refuses the upgrade with `426` - the session leaves WebSocket for the rest of its life and runs on HTTP/SSE with full history. A restarted turn tells `:on-chunk` so consumers can drop text from an interrupted attempt: `{:event/type :llm.session/stream-restarted :restarted? true :content ""}`; close-frame restarts additionally expose non-sensitive `:close-status` and `:close-reason`. Informational `codex.rate_limits` events are normalized into the result’s `:rate-limits` and emitted through `:on-chunk` as `{:event/type :llm.session/rate-limits :rate-limits …}`. Calls on one session are serialized. The caller's `:cancel-fn` is observed even while a completely quiet socket is waiting; cancellation aborts that socket and surfaces `:svar.core/stream-cancelled` without reconnect or HTTP fallback. `with-open` or `close-session!` closes an idle socket gracefully and aborts an active one. `session-history` returns the replayable canonical messages and `session-status` returns Svar's live observability snapshot.
 
-The API name is provider-neutral, but the stateful backend currently supports only `:openai-codex`; opening it for another provider fails explicitly instead of pretending that provider has server-side continuation.
+### Anthropic Message Threads (`open-session`)
+
+For long conversations on the direct Anthropic API, open an explicit session:
+
+```clojure lazytest/skip=true
+(with-open [session (svar/open-session
+                      router
+                      {:routing {:provider :anthropic
+                                 :model "claude-sonnet-4-6"}})]
+  (svar/ask! session "Explain the design.")
+  (svar/ask! session "Compare the alternatives."))
+```
+
+The first request sends full context. Later requests send only new messages over HTTP or SSE.
+Svar keeps canonical history locally. Expiry, history edits, or fixed setting changes start a new thread.
+Unsupported thread requests use ordinary HTTP requests instead.
+This backend excludes coding-plan OAuth and compatible proxies.
+
+Threads expire after five idle minutes. They do not change token prices or replace prompt caching.
+Use `:prompt-cache-options {}` to place cache markers after history synchronization.
+Use `session-capability` to check the selected route before opening a session.
+
+An empty input resumes `pause_turn`. Empty input after a completed turn is rejected.
+Refusals stay in `session-history`, but their turns are excluded from later model replay.
+Explicit history replacement clears those exclusions.
+
+Do not use threads when you require zero data retention (ZDR).
+Anthropic retains encrypted thread data in memory for up to one hour after its last use.
+There is no deletion API. Closing a session only closes the local handle.
+See [Anthropic's Message Threads documentation](https://platform.claude.com/docs/en/build-with-claude/message-threads).
 
 ### Reasoning depth and output verbosity
 

@@ -320,6 +320,10 @@
    rolling prior-turn boundary; older OpenAI-compatible styles strip the marker."
   llm/cached)
 
+(def session-capability
+  "Return session support and opt-in policy for the effective provider and model."
+  llm/session-capability)
+
 (def place-prompt-cache-breakpoints
   "Marks the rolling prompt-cache breakpoints of `messages` for a provider id: the
    last shared system message plus the last three transcript messages, on the
