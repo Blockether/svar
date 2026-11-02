@@ -1117,6 +1117,45 @@
           (expect (= [:server-error :server-error :transient-error] (mapv :reason trace)))
           (expect (= status (:status (last trace)))))))))
 
+;; Regression, Vis session 3dba908d-65c7-42bd-823d-528edfce25f2: Anthropic sent
+;; 529 `overloaded_error` after 2968 chars of thinking. The router counted the
+;; thinking as kept output and failed a 26-iteration turn without one retry.
+(defdescribe
+  with-provider-fallback-mid-stream-transient-test
+  "A transient status that arrives mid-stream is re-sent while only reasoning streamed.
+   The `provider-retry` event tells the caller to drop that reasoning."
+  (doseq [[label output expected-calls] [["re-sends a 529 that streamed only reasoning"
+                                          {:reasoning-acc-len 2968 :content-acc-len 0} [:p1 :p1]]
+                                         ["never re-sends a 529 after answer text"
+                                          {:reasoning-acc-len 2968 :content-acc-len 5} [:p1]]]]
+    (it label
+        (let [[clock _] (mock-clock)
+              r (llm/make-router
+                  [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}]
+                  {:clock clock
+                   :max-wait-ms 0
+                   :rate-limit {:same-provider-delays-ms [0 0] :fallback-after-ms 60000}})
+              calls (atom [])
+              live (atom [])
+              outcome
+              (try (router/with-provider-fallback
+                     r
+                     {:on-chunk #(swap! live conj %)}
+                     (fn [provider _model]
+                       (swap! calls conj (:id provider))
+                       (if (= 1 (count @calls))
+                         (throw (ex-info
+                                  "Provider stream failed (overloaded_error): Overloaded"
+                                  (merge {:type :svar.core/stream-failed :status 529 :stream? true}
+                                         output)))
+                         (success-result 100))))
+                   (catch Exception e {:thrown e}))]
+
+          (expect (= expected-calls @calls))
+          (expect (= (dec (count expected-calls))
+                     (count (filter #(= :llm.routing/provider-retry (:event/type %)) @live))))
+          (expect (= (= 1 (count expected-calls)) (contains? outcome :thrown)))))))
+
 ;; Regression, Vis session ff83edc9-247d-4f04-9fab-3dd7072d5a34: an exhausted
 ;; account stopped the fleet instead of skipping that provider.
 (defdescribe

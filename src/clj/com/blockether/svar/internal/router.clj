@@ -3480,6 +3480,19 @@
              (some? (:partial-content data))
              (some? (:reasoning data))))))
 
+(defn- transient-replay-unsafe?
+  "True when re-sending the transient failure `e` would repeat output the caller kept.
+   Answer text and tool calls are kept. Reasoning alone is not: the `provider-retry` or
+   `provider-fallback` event tells the caller to drop it, as for stream recovery.
+
+   Regression, vis session 3dba908d: an Anthropic 529 `overloaded_error` after 2968 chars
+   of thinking counted as kept output, so no layer re-sent it and the turn died. The
+   low-level ladder declines a started stream on purpose and leaves the replay to this
+   router path, because only the router announces the reset."
+  [e]
+  (let [data (ex-data e)]
+    (and (not (true? (:safe-to-restart? data))) (failure/answer-output-started? data))))
+
 (defn- rate-limit-delay-ms
   "Configured delay for the next same-provider retry, in ms, or nil once the
    `:same-provider-delays-ms` schedule is exhausted.
@@ -3665,7 +3678,7 @@
                                    (propagate-interrupt! next-error)
                                    {:error next-error}))]
                 (if (and (:error outcome) (router-transient-error? router (:error outcome)))
-                  (if (stream-content-started? (:error outcome))
+                  (if (transient-replay-unsafe? (:error outcome))
                     (throw (:error outcome))
                     (recur (inc retry-index) (:error outcome)))
                   ;; Non-transient outcome (success, or a terminal error like
@@ -4088,12 +4101,13 @@
                                                              e
                                                              start-ms
                                                              recovery-allowance)
-                          (and (or (router-transient-error? router e)
-                                   (stream-watchdog-error? e)
-                                   (= :quota-exhausted (:category (classify-failure e)))
-                                   (and (= :fallback-provider (:on-auth-error prefs))
-                                        (= :auth (:category (classify-failure e)))))
-                               (stream-content-started? e))
+                          (if (router-transient-error? router e)
+                            (transient-replay-unsafe? e)
+                            (and (or (stream-watchdog-error? e)
+                                     (= :quota-exhausted (:category (classify-failure e)))
+                                     (and (= :fallback-provider (:on-auth-error prefs))
+                                          (= :auth (:category (classify-failure e)))))
+                                 (stream-content-started? e)))
                           (throw (routed-failure e @trace @selected provider model-map))
                           ;; Watchdog spent its wait budget. Cross providers now.
                           (stream-watchdog-error? e)
