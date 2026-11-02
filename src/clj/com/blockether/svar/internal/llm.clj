@@ -10487,8 +10487,8 @@
           :anthropic-message-threads)))
 
 (defn session-capability
-  "Return session support for the effective route. Anthropic auto-open requires thread.type=create.
-   An explicit open-session call is also an opt-in. Threads are not ZDR eligible."
+  "Return session support for the effective route. Supported routes auto-open by default.
+   Set extra-body.thread to nil to disable Anthropic auto-open. Threads are not ZDR eligible."
   [router opts]
   (let [resolved
         (router/resolve-routing router (routing-opts-with-reasoning opts))
@@ -10505,8 +10505,9 @@
        :backend backend
        :auto-open? (or (= :responses-websocket backend)
                        (= "create"
-                          (get-in (inject-routed-params opts provider model-map)
-                                  [:extra-body :thread :type])))})))
+                          (:type (get-in (inject-routed-params opts provider model-map)
+                                         [:extra-body :thread]
+                                         {:type "create"}))))})))
 
 (defn- session-call-route
   [router base-opts turn-opts provider-id backend]

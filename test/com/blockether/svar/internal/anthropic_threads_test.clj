@@ -7,12 +7,14 @@
             [lazytest.core :refer [defdescribe expect it]]))
 
 (defn- thread-router
-  []
-  (svar/make-router [{:id :anthropic
-                      :api-key "test-key"
-                      :base-url "https://example.invalid/v1"
-                      :models [{:name "claude-sonnet-4-6" :context 200000}
-                               {:name "claude-opus-4-6" :context 200000}]}]))
+  ([] (thread-router {} {}))
+  ([provider-body model-body]
+   (svar/make-router [{:id :anthropic
+                       :api-key "test-key"
+                       :base-url "https://example.invalid/v1"
+                       :extra-body provider-body
+                       :models [{:name "claude-sonnet-4-6" :context 200000 :extra-body model-body}
+                                {:name "claude-opus-4-6" :context 200000}]}])))
 
 (defn- message
   [id text]
@@ -47,6 +49,40 @@
                              :extra-body {:max_tokens 128}
                              :max-retries 0}
                             opts)))
+
+;; User request: enable threads by default without overriding explicit thread settings.
+(defdescribe
+  anthropic-auto-open-test
+  (it "enables automatic sessions without thread settings"
+      (expect (true? (:auto-open? (svar/session-capability (thread-router)
+                                                           {:routing {:provider :anthropic
+                                                                      :model
+                                                                      "claude-sonnet-4-6"}})))))
+  (it "honors a provider opt-out"
+      (expect (false? (:auto-open? (svar/session-capability (thread-router {"thread" nil} {})
+                                                            {:routing {:provider :anthropic
+                                                                       :model
+                                                                       "claude-sonnet-4-6"}})))))
+  (it "lets a model opt out of the provider setting"
+      (expect (false? (:auto-open? (svar/session-capability
+                                     (thread-router {:thread {:type "create"}} {:thread nil})
+                                     {:routing {:provider :anthropic
+                                                :model "claude-sonnet-4-6"}})))))
+  (it "lets a call opt out of the model setting"
+      (expect (false? (:auto-open? (svar/session-capability
+                                     (thread-router {} {:thread {:type "create"}})
+                                     {:routing {:provider :anthropic :model "claude-sonnet-4-6"}
+                                      :extra-body {"thread" nil}})))))
+  (it "lets a call enable threads after a provider opt-out"
+      (expect (true? (:auto-open? (svar/session-capability
+                                    (thread-router {:thread nil} {})
+                                    {:routing {:provider :anthropic :model "claude-sonnet-4-6"}
+                                     :extra-body {:thread {:type "create"}}})))))
+  (it "does not replace an explicit empty thread setting"
+      (expect (false? (:auto-open? (svar/session-capability (thread-router {:thread {}} {})
+                                                            {:routing {:provider :anthropic
+                                                                       :model
+                                                                       "claude-sonnet-4-6"}}))))))
 
 ;; User request: use Anthropic Message Threads in Svar and Vis without resending history.
 (defdescribe anthropic-thread-session-test

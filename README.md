@@ -362,6 +362,9 @@ This backend excludes coding-plan OAuth and compatible proxies.
 Threads expire after five idle minutes. They do not change token prices or replace prompt caching.
 Use `:prompt-cache-options {}` to place cache markers after history synchronization.
 Use `session-capability` to check the selected route before opening a session.
+It returns `:auto-open? true` by default for supported routes.
+Set `:extra-body {:thread nil}` on the provider, model, or call to disable automatic Anthropic sessions.
+Ordinary `ask-code!` calls do not open sessions automatically.
 
 An empty input resumes `pause_turn`. Empty input after a completed turn is rejected.
 Refusals stay in `session-history`, but their turns are excluded from later model replay.
