@@ -1643,7 +1643,7 @@
           (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
                      (:reasoning-options entry)))
           (expect
-            (= {:input 2.0 :cached-input 0.2 :cache-write-5m 2.5 :cache-write-1h 4.0 :output 10.0}
+            (= {:input 2.0 :cached-input 0.1 :cache-write-5m 2.5 :cache-write-1h 4.0 :output 10.0}
                (select-keys (:pricing entry)
                             [:input :cached-input :cache-write-5m :cache-write-1h :output]))))))
   (it

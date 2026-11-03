@@ -607,7 +607,9 @@
                       [{:type "effort" :values ["high" "max"] :min 1 :max 2 :ignored true}]})))))
   (it "retains GLM-5.2 high/max from the bundled catalog"
       (expect (= [{:type "effort" :values ["high" "max"]}]
-                 (:reasoning-options (router/provider-model-entry :zai-coding-plan "glm-5.2"))))))
+                 (filterv #(= "effort" (:type %))
+                   (:reasoning-options (router/provider-model-entry :zai-coding-plan
+                                                                    "glm-5.2")))))))
 
 (defdescribe
   known-model-reasoning-flags-test

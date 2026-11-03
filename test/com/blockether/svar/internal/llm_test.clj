@@ -471,28 +471,29 @@
             (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"] (mapv :id (svar/models! router))))))))
   (it "filters GitHub Copilot /models below GPT-5.3 while keeping non-GPT families"
       (let [router (svar/make-router
-                     [{:id :github-copilot :api-key "sk-test" :models [{:name "gpt-5.4"}]}])]
+                     [{:id :github-copilot :api-key "sk-test" :models [{:name "gpt-6-sol"}]}])]
         (sut/clear-models-cache!)
         (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                            {"data" [{"id" "claude-sonnet-4.6"} {"id" "gpt-4o"}
                                                     {"id" "gpt-5.1-codex"} {"id" "gpt-5.3-codex"}
-                                                    {"id" "gpt-5.4"} {"id" "gpt-5.5"}
+                                                    {"id" "gpt-6-sol"} {"id" "gpt-6.1-sol"}
                                                     {"id" "gemini-3-pro-preview"}]})}
           (fn []
-            (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
+            (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-6-sol" "gpt-6.1-sol"]
                        (mapv :id (svar/models! router))))))))
   (it "leaves stealth, preview and old MiMo models out of /models output"
       (let [router (svar/make-router [{:id :openrouter
                                        :api-key "sk-test"
                                        :models [{:name "xiaomi/mimo-v2.6-pro"}]}])]
         (sut/clear-models-cache!)
-        (with-redefs-fn {#'sut/http-get!
-                         (fn [_url _api-key & _opts]
-                           {"data" [{"id" "xiaomi/mimo-v2.6-pro"} {"id" "xiaomi/mimo-v2.5-pro"}
-                                    {"id" "google/gemini-3.1-pro-preview"}
-                                    {"id" "google/gemini-2.5-pro"} {"id" "opencode/big-pickle"}]})}
+        (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
+                                           {"data" [{"id" "xiaomi/mimo-v2.6-pro"}
+                                                    {"id" "xiaomi/mimo-v2.5-pro"}
+                                                    {"id" "google/gemini-3.1-pro-preview"}
+                                                    {"id" "anthropic/claude-sonnet-4.6"}
+                                                    {"id" "opencode/big-pickle"}]})}
           (fn []
-            (expect (= ["xiaomi/mimo-v2.6-pro" "google/gemini-2.5-pro"]
+            (expect (= ["xiaomi/mimo-v2.6-pro" "anthropic/claude-sonnet-4.6"]
                        (mapv :id (svar/models! router))))))))
   (it "keeps z.ai Coding Plan glm-5v-turbo and drops outdated GLM in /models output"
       (let [router (svar/make-router

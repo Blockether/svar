@@ -60,10 +60,10 @@
 (defdescribe
   copilot-missing-budget-diagnostic
   (it "reports missing Sonnet limits instead of presenting the 6144-token fallback as real"
-      (let [data (budget-error {:name "claude-sonnet-5.5"})]
+      (let [data (budget-error {:name "claude-sonnet-future"})]
         (expect (= :svar.llm/model-metadata-unavailable (:type data)))
         (expect (= :github-copilot (:provider-id data)))
-        (expect (= "claude-sonnet-5.5" (:model data)))
+        (expect (= "claude-sonnet-future" (:model data)))
         (expect (= :missing-input-limit (:reason data)))
         (expect (nil? (:max-input-tokens data)))
         (expect (= {:category :invalid-request :retryable? false :reached-model? false}
