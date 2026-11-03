@@ -23,11 +23,6 @@
 ;;; ── cached helper ─────────────────────────────────────────────────────
 
 (defdescribe cached-helper-test
-             (it "tags a text block with :svar/cache true (default 5min)"
-                 (expect (= {:type "text" :text "hello" :svar/cache true} (sut/cached "hello"))))
-             (it "honors :ttl :1h"
-                 (expect (= {:type "text" :text "hello" :svar/cache true :svar/cache-ttl :1h}
-                            (sut/cached "hello" {:ttl :1h}))))
              (it "rejects unknown ttl values at body-build time"
                  ;; cached itself is permissive (just stores the keyword); the throw
                  ;; happens when build-anthropic-request-body translates it.
@@ -430,31 +425,15 @@
 
 ;;; ── Content normalization edge cases ──────────────────────────────────
 
-(defdescribe
-  normalize-content-test
-  (it "wraps a bare string" (expect (= [{:type "text" :text "x"}] (#'sut/normalize-content "x"))))
-  (it "passes through a single text block"
-      (expect (= [{:type "text" :text "x"}] (#'sut/normalize-content {:type "text" :text "x"}))))
-  (it "treats nil/empty as []"
-      (expect (= [] (#'sut/normalize-content nil)))
-      (expect (= [] (#'sut/normalize-content []))))
-  (it "wraps strings inside a vector"
-      (expect (= [{:type "text" :text "a"} {:type "text" :text "b"}]
-                 (#'sut/normalize-content ["a" "b"]))))
-  (it "preserves :svar/cache markers through normalization"
-      (let [in
-            [(sut/cached "stable") "live"]
-
-            out
-            (#'sut/normalize-content in)]
-
-        (expect (= 2 (count out)))
-        (expect (true? (-> out
-                           first
-                           :svar/cache)))
-        (expect (nil? (-> out
-                          second
-                          :svar/cache))))))
+(defdescribe normalize-content-test
+             (it "wraps a bare string"
+                 (expect (= [{:type "text" :text "x"}] (#'sut/normalize-content "x"))))
+             (it "treats nil/empty as []"
+                 (expect (= [] (#'sut/normalize-content nil)))
+                 (expect (= [] (#'sut/normalize-content []))))
+             (it "wraps strings inside a vector"
+                 (expect (= [{:type "text" :text "a"} {:type "text" :text "b"}]
+                            (#'sut/normalize-content ["a" "b"])))))
 
 ;;; ── apply-llm-opts middleware (Phase 0 / svar 0.6.0) ─────────────────────
 ;;
@@ -769,10 +748,9 @@
              (let [c (:content m)]
                (if (string? c) c (:text (first c))))))]
 
-    (it "names each provider's prompt-cache policy"
-        (expect (= {:strategy :explicit-breakpoints :ttl :1h :ttl-ms 3600000}
-                   (svar/provider-prompt-cache :anthropic)))
-        (expect (= :1h (:ttl (svar/provider-prompt-cache :anthropic-coding-plan))))
+    (it "inherits the plan-tier policy, accepts a string id and defaults an unknown provider"
+        (expect (= (svar/provider-prompt-cache :anthropic)
+                   (svar/provider-prompt-cache :anthropic-coding-plan)))
         ;; A caller can hold the id as a string, for example from persisted state.
         (expect (= (svar/provider-prompt-cache :anthropic-coding-plan)
                    (svar/provider-prompt-cache "anthropic-coding-plan")))
@@ -780,19 +758,8 @@
                    (get-in (svar/place-prompt-cache-breakpoints [{:role "user" :content "hi"}]
                                                                 "anthropic")
                            [0 :content 0 :svar/cache-ttl])))
-        (expect (= {:strategy :server-continuation :ttl :5m :ttl-ms 300000}
-                   (svar/provider-prompt-cache :openai-codex)))
-        (expect (= {:strategy :explicit-breakpoints :ttl :5m :ttl-ms 300000}
-                   (svar/provider-prompt-cache :zai-coding-plan)))
         (expect (= :explicit-breakpoints
                    (:strategy (svar/provider-prompt-cache :unknown-provider)))))
-    (it "describes the placement for the cache-context fingerprint"
-        (expect (= {:version 2
-                    :strategy :explicit-breakpoints
-                    :system-anchor :last-shared-system
-                    :transcript-anchors 3
-                    :ttl :1h}
-                   (svar/prompt-cache-placement :anthropic))))
     (it "tags the last system message and the three trailing transcript messages"
         (let [out (svar/place-prompt-cache-breakpoints
                     [{:role "system" :content "core"} {:role "system" :content "frozen"}

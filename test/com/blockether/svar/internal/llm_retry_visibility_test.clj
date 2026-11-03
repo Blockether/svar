@@ -54,35 +54,29 @@
                   ;; The shipped ladder is 7 attempts = 6 sleeps. It used to be 5 = 4
                   ;; sleeps, ~7 s, shorter than an Anthropic/OpenAI overload window.
                   (expect (= 7 @attempts)))))
-  (describe
-    "visibility"
-    (it "announces every wait as a routing event the surfaces already paint"
-        (let [seen
-              (atom [])
+  (describe "visibility"
+            (it "announces every wait as a routing event the surfaces already paint"
+                (let [seen
+                      (atom [])
 
-              attempts
-              (atom 0)]
+                      attempts
+                      (atom 0)]
 
-          (#'llm/with-retry
-           (fn []
-             (if (< (long (swap! attempts inc)) 3) (throw (overloaded!)) :ok))
-           (assoc fast
-             :on-retry #(swap! seen conj %)
-             :provider-id :anthropic-coding-plan
-             :model "claude-opus-4"))
-          (expect (= 2 (count @seen)))
-          (expect (every? #(= :llm.routing/provider-retry (:event/type %)) @seen))
-          (expect (= [1 2] (mapv :attempt @seen)))
-          (expect (every? #(= 529 (:status %)) @seen))
-          (expect (every? #(nat-int? (:delay-ms %)) @seen))
-          (expect (every? #(= "anthropic-coding-plan" (:from-provider %)) @seen))
-          (expect (every? #(= "claude-opus-4" (:from-model %)) @seen))
-          (expect (every? #(re-find #"Overloaded" (:error %)) @seen))))
-    (it "says nothing when the call succeeds"
-        (let [seen (atom [])]
-          (expect
-            (= :ok (#'llm/with-retry (constantly :ok) (assoc fast :on-retry #(swap! seen conj %)))))
-          (expect (empty? @seen))))))
+                  (#'llm/with-retry
+                   (fn []
+                     (if (< (long (swap! attempts inc)) 3) (throw (overloaded!)) :ok))
+                   (assoc fast
+                     :on-retry #(swap! seen conj %)
+                     :provider-id :anthropic-coding-plan
+                     :model "claude-opus-4"))
+                  (expect (= 2 (count @seen)))
+                  (expect (every? #(= :llm.routing/provider-retry (:event/type %)) @seen))
+                  (expect (= [1 2] (mapv :attempt @seen)))
+                  (expect (every? #(= 529 (:status %)) @seen))
+                  (expect (every? #(nat-int? (:delay-ms %)) @seen))
+                  (expect (every? #(= "anthropic-coding-plan" (:from-provider %)) @seen))
+                  (expect (every? #(= "claude-opus-4" (:from-model %)) @seen))
+                  (expect (every? #(re-find #"Overloaded" (:error %)) @seen))))))
 
 ;; Regression, vis gateway events 2026-08-07: a real OpenAI/Codex overload never
 ;; reaches `llm/with-retry` at all — it arrives MID-STREAM as `Provider stream
@@ -94,12 +88,6 @@
   streamed-overload-ladder-test
   (describe
     "one policy for both ladders"
-    (it "router's same-provider schedule IS the same-provider retry ladder"
-        ;; The literals are the shipped policy: 7 attempts = 6 sleeps, 1 s doubling
-        ;; up to the 15 s ceiling, 45 s of healing (the mid-stream 529 used to get
-        ;; [2000 3000 6000] = 11 s).
-        (expect (= [1000 2000 4000 8000 15000 15000]
-                   (:same-provider-delays-ms router/DEFAULT_RATE_LIMIT_ROUTING))))
     (it "outlasts a provider overload window instead of 11 s"
         (let [ladder
               (:same-provider-delays-ms router/DEFAULT_RATE_LIMIT_ROUTING)

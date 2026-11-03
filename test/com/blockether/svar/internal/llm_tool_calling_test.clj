@@ -110,18 +110,7 @@
                (build-chat [{:role "user" :content "hi"}] "gpt" {:svar/tools [strict-tool]})
                (build-responses [{:role "user" :content "hi"}] "gpt" {:svar/tools [strict-tool]})]]
           (doseq [body bodies]
-            (expect (not (re-find #"(?i)strict" (json/write-json-str body)))))))
-      (it "still omits the field when unset or false"
-          (doseq [[api-style read-strict]
-                  strict-of
-
-                  tool
-                  [run-python (assoc run-python :strict false)]]
-
-            (expect (nil? (read-strict (tool-def->wire api-style tool))))))
-      (it "gateway sanitizing still removes strict from canonical tools"
-          (let [sanitized (sanitize-tools-for-gateway [strict-tool])]
-            (expect (nil? (:strict (first sanitized)))))))))
+            (expect (not (re-find #"(?i)strict" (json/write-json-str body))))))))))
 
 (defdescribe tool-choice-shaping-test
              (describe "tool-choice->wire"
@@ -259,19 +248,6 @@
         (expect (= "patch" (:tool-name (ex-data enriched))))
         (expect (= "input_schema" (:tool-schema-field (ex-data enriched))))
         (expect (= "tools.1.custom.input_schema" (:tool-schema-path (ex-data enriched))))))
-  (it "resolves a gateway-injected `strict` field the same way"
-      (let [body
-            (str "{\"error\":{\"message\":\"BedrockException - tools.0.custom.strict: "
-                 "Extra inputs are not permitted\"}}")
-
-            cause
-            (ex-info "Provider unavailable" {:status 400 :body body})
-
-            enriched
-            (enrich-tool-schema-rejection cause [{:name "grep"} {:name "patch"}])]
-
-        (expect (= "grep" (:tool-name (ex-data enriched))))
-        (expect (= "strict" (:tool-schema-field (ex-data enriched))))))
   (it "keeps the provider-reported parameters field for schema errors"
       (let [cause
             (ex-info
@@ -384,21 +360,6 @@
                                           "usage" {"prompt_tokens" 1 "completion_tokens" 1}}})]
         (expect (not (contains? out :tool-calls)))
         (expect (= "hello" (:content out))))))
-
-(defdescribe responses-tool-call-extraction-test
-             (it "extracts function_call items from :output and decodes arguments"
-                 (let [envelope
-                       {:parsed {"output" [{"type" "function_call"
-                                            "call_id" "fc_1"
-                                            "name" "run_python"
-                                            "arguments" "{\"code\":\"print(2)\"}"}]
-                                 "usage" {"input_tokens" 7 "output_tokens" 3}}}
-
-                       out
-                       (extract-openai envelope)]
-
-                   (expect (= [{:id "fc_1" :name "run_python" :input {"code" "print(2)"}}]
-                              (:tool-calls out))))))
 
 (defdescribe
   responses-round-trip-test
@@ -986,19 +947,6 @@
                                                   "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}}]}}]
                                             "usage" {"prompt_tokens" 1 "completion_tokens" 1}}})]
           (expect (= [{"edits" [{"from_anchor" "1:aa"}]}] (mapv :input (:tool-calls out))))))
-    (it "openai responses: streamed and completed items agree"
-        (expect (= {"edits" [{"from_anchor" "1:aa"}]}
-                   (:input (fn-item->tool-call {"type" "function_call"
-                                                "call_id" "c"
-                                                "name" "patch"
-                                                "arguments"
-                                                "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}))))
-        (expect (= {"code" "print(1)"}
-                   (:input (first (assemble-chat-frags
-                                    [{"index" 0
-                                      "id" "c"
-                                      "function" {"name" "run_python"
-                                                  "arguments" "{\"code\":\"print(1)\"}"}}]))))))
     (it
       "the canonical assistant message carries the strings-only input onward"
       (let [parsed

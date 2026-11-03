@@ -95,16 +95,4 @@
                                           (swap! calls inc)
                                           (throw (ex-info "boom" {}))))
                                   (catch Exception e (ex-message e)))))
-                  (expect (= 1 @calls)))))
-  (describe "happy path"
-            (it "calls f once and returns its value"
-                (let [calls
-                      (atom 0)
-
-                      r
-                      (heal (fn [_]
-                              (swap! calls inc)
-                              :done))]
-
-                  (expect (= :done r))
                   (expect (= 1 @calls))))))

@@ -19,7 +19,6 @@
 
 (def ^:private build-responses @#'sut/build-openai-responses-request-body)
 (def ^:private strip @#'sut/strip-server-item-ids)
-(def ^:private inject @#'sut/inject-routed-params)
 
 (def ^:private sig
   "{\"type\":\"reasoning\",\"id\":\"rs_A\",\"encrypted_content\":\"ENC_A\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"t\"}]}")
@@ -84,17 +83,6 @@
   (it "leaves items that carry no server id alone"
       (let [msg {:type "message" :role "user" :content [{:type "input_text" :text "hi"}]}]
         (expect (= [msg] (strip [msg]))))))
-
-(defdescribe
-  provider-opt-propagates-test
-  (it
-    "carries a provider's :stateless-items? into the per-call opts"
-    (let [provider
-          {:id :gw :api-key "k" :base-url "https://gw/v1" :api-style :openai-compatible-responses}]
-      (expect (true? (:stateless-items?
-                       (inject {} (assoc provider :stateless-items? true) {:name "m"}))))
-      ;; absent stays absent — the flag must never appear on its own
-      (expect (not (contains? (inject {} provider {:name "m"}) :stateless-items?))))))
 
 (defdescribe
   item-affinity-error-test

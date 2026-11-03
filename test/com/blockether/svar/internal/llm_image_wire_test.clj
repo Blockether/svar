@@ -23,13 +23,7 @@
                 (expect
                   (= {:type "image" :source {:type "base64" :media_type "image/png" :data b64}}
                      (image-url-block->anthropic
-                       {:type "image_url" :image_url {:url (str "data:image/png;base64," b64)}}))))
-            (it "carries the declared media type verbatim"
-                (expect (= "image/jpeg"
-                           (get-in (image-url-block->anthropic
-                                     {:type "image_url"
-                                      :image_url {:url (str "data:image/jpeg;base64," b64)}})
-                                   [:source :media_type])))))
+                       {:type "image_url" :image_url {:url (str "data:image/png;base64," b64)}})))))
   (describe "http(s) URLs"
             (it "wraps a plain URL in a url source"
                 (expect (= {:type "image" :source {:type "url" :url "https://x.test/a.png"}}

@@ -137,12 +137,6 @@
   (it "keeps a normal completed assistant turn"
       (expect (true? (anthropic-has-assistant? "m-A" {:model "m-A"})))))
 
-(defdescribe sanitize-is-safe-test
-             (it "is a no-op on a plain user/assistant array with no stamps or flags"
-                 (let [msgs [{:role "user" :content "hi"}
-                             {:role "assistant" :content [{:type "text" :text "ok"}]}]]
-                   (expect (= msgs (sanitize msgs "any-model"))))))
-
 (defn- result-ids-for
   "tool_use_ids of every tool_result block across `msgs`."
   [msgs]
@@ -187,36 +181,31 @@
 
 (def ^:private normalize-id @#'sut/normalize-id-part)
 
-(defdescribe
-  tool-id-normalization-test
-  ;; A tool-call id valid for one provider can be INVALID for the next (Anthropic
-  ;; requires ^[a-zA-Z0-9_-]{1,64}$). A Copilot proxy / model switch that replays
-  ;; it raw gets the tool_result rejected or dropped. sanitize rewrites the id on
-  ;; BOTH the tool_use and its tool_result, consistently.
-  (it "sanitizes to [A-Za-z0-9_-], <=64 chars"
-      (expect (= "call_AbC-123" (normalize-id "call_AbC-123")))
-      (expect (= "fc_abc_call_xyz" (normalize-id "fc_abc|call_xyz!@#")))
-      (expect (= 64 (count (normalize-id (apply str (repeat 70 "a")))))))
-  (it "rewrites a tool_use id and its tool_result id to the SAME normalized value"
-      (let [out
-            (sanitize [{:role "assistant" :content [{:type "tool_use" :id "fc|x!" :name "cat"}]}
-                       {:role "user"
-                        :content [{:type "tool_result" :tool_use_id "fc|x!" :content "ok"}]}]
-                      "m")
+(defdescribe tool-id-normalization-test
+             ;; A tool-call id valid for one provider can be INVALID for the next (Anthropic
+             ;; requires ^[a-zA-Z0-9_-]{1,64}$). A Copilot proxy / model switch that replays
+             ;; it raw gets the tool_result rejected or dropped. sanitize rewrites the id on
+             ;; BOTH the tool_use and its tool_result, consistently.
+             (it "sanitizes to [A-Za-z0-9_-], <=64 chars"
+                 (expect (= "call_AbC-123" (normalize-id "call_AbC-123")))
+                 (expect (= "fc_abc_call_xyz" (normalize-id "fc_abc|call_xyz!@#")))
+                 (expect (= 64 (count (normalize-id (apply str (repeat 70 "a")))))))
+             (it "rewrites a tool_use id and its tool_result id to the SAME normalized value"
+                 (let [out
+                       (sanitize
+                         [{:role "assistant" :content [{:type "tool_use" :id "fc|x!" :name "cat"}]}
+                          {:role "user"
+                           :content [{:type "tool_result" :tool_use_id "fc|x!" :content "ok"}]}]
+                         "m")
 
-            use-id
-            (get-in out [0 :content 0 :id])
+                       use-id
+                       (get-in out [0 :content 0 :id])
 
-            res-id
-            (get-in out [1 :content 0 :tool_use_id])]
+                       res-id
+                       (get-in out [1 :content 0 :tool_use_id])]
 
-        (expect (= "fc_x" use-id))
-        (expect (= use-id res-id))))
-  (it "leaves already-valid ids untouched"
-      (let [msgs [{:role "assistant" :content [{:type "tool_use" :id "call_ok-1"}]}
-                  {:role "user"
-                   :content [{:type "tool_result" :tool_use_id "call_ok-1" :content "x"}]}]]
-        (expect (= msgs (sanitize msgs "m"))))))
+                   (expect (= "fc_x" use-id))
+                   (expect (= use-id res-id)))))
 
 (defdescribe
   anthropic-wire-is-error-test

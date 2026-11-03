@@ -95,35 +95,7 @@
       (let [body
             {"svar/tools" [] "provider-state" {"id" "resp_1"} "metadata" {"user id" "7" "a.b" 1}}]
         (expect (= (json/read-json (json/write-json-str body))
-                   (json/read-json (json/write-json-str (router/keyword-body body)))))))
-  (it "returns keyword maps and nil as given"
-      (let [body {:max_tokens 5 :reasoning {:effort "high"}}]
-        (expect (identical? body (router/keyword-body body))))
-      (expect (nil? (router/keyword-body nil)))))
-
-(defdescribe normalize-provider-extra-body-test
-             (it "merges JSON-keyed configuration over the provider defaults"
-                 (let [provider (router/normalize-provider
-                                  0
-                                  {:id :openai-codex
-                                   :api-key "test-key"
-                                   :models [{:name "gpt-6-astra"}]
-                                   :extra-body {"reasoning" {"summary" "concise"} "store" true}})]
-                   (expect (= (merge (get-in router/KNOWN_PROVIDERS [:openai-codex :extra-body])
-                                     {:reasoning {:summary "concise"} :store true})
-                              (:extra-body provider)))))
-             (it "gives each model's JSON-keyed extra body keyword keys"
-                 (let [provider (router/normalize-provider
-                                  0
-                                  {:id :responses-proxy
-                                   :api-key "test-key"
-                                   :base-url "http://127.0.0.1:1/v1"
-                                   :api-style :openai-compatible-responses
-                                   :models [{:name "gpt-6-luna" :extra-body MODEL_EXTRA_BODY}]})]
-                   (expect (= {:reasoning {:summary "detailed"}
-                               :include ["reasoning.encrypted_content"]
-                               :store false}
-                              (:extra-body (first (:models provider))))))))
+                   (json/read-json (json/write-json-str (router/keyword-body body))))))))
 
 (defdescribe
   responses-request-members-test

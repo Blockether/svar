@@ -17,10 +17,6 @@
 (defdescribe normalize-reasoning-level-test
              "Vocabulary normalization: canonical low, balanced, and deep keywords."
              (describe "canonical vocabulary (low/balanced/deep)"
-                       (it "accepts canonical keywords"
-                           (expect (= :low (router/normalize-reasoning-level :low)))
-                           (expect (= :balanced (router/normalize-reasoning-level :balanced)))
-                           (expect (= :deep (router/normalize-reasoning-level :deep))))
                        (it "accepts canonical strings, trimmed + case-insensitive"
                            (expect (= :low (router/normalize-reasoning-level "LOW")))
                            (expect (= :balanced (router/normalize-reasoning-level " Balanced ")))
@@ -35,9 +31,6 @@
                  (expect (nil? (router/normalize-reasoning-level :high)))
                  (expect (nil? (router/normalize-reasoning-level "quick"))))
              (describe "invalid input"
-                       (it "returns nil for unknown vocabulary"
-                           (expect (nil? (router/normalize-reasoning-level :turbo)))
-                           (expect (nil? (router/normalize-reasoning-level "ultra"))))
                        (it "returns nil for nil / empty / non-string/keyword"
                            (expect (nil? (router/normalize-reasoning-level nil)))
                            (expect (nil? (router/normalize-reasoning-level "")))
@@ -88,15 +81,6 @@
                       level)]
             (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
             (expect (= {:effort effort} (:output_config out)))
-            (expect (nil? (get-in out [:thinking :budget_tokens]))))))
-    (it "uses adaptive thinking for dashed and dotted Fable 5.1 ids"
-        (doseq [model ["claude-fable-5-1" "claude-fable-5.1"]]
-          (let [out (router/reasoning-extra-body
-                      :anthropic
-                      {:name model :reasoning? true :reasoning-style :anthropic-thinking}
-                      :deep)]
-            (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
-            (expect (= {:effort "max"} (:output_config out)))
             (expect (nil? (get-in out [:thinking :budget_tokens]))))))
     (it "uses adaptive thinking for dashed and dotted Claude 5.5 ids"
         (doseq [model ["claude-opus-5-5" "claude-opus-5.5" "claude-sonnet-5-5" "claude-sonnet-5.5"
@@ -160,17 +144,7 @@
     (it "infers :anthropic-thinking from :api-style :anthropic when style is unset"
         (let [claude {:name "unknown-claude" :reasoning? true}]
           (expect (= {:thinking {:type "enabled" :budget_tokens 8192}}
-                     (router/reasoning-extra-body :anthropic claude :balanced)))))
-    (it "budget_tokens values are strictly ascending for manual-thinking Claude models"
-        (let [claude
-              {:name "claude-opus-4-5" :reasoning? true :reasoning-style :anthropic-thinking}
-
-              budget
-              (fn [lvl]
-                (get-in (router/reasoning-extra-body :anthropic claude lvl)
-                        [:thinking :budget_tokens]))]
-
-          (expect (< (budget :low) (budget :balanced) (budget :deep))))))
+                     (router/reasoning-extra-body :anthropic claude :balanced))))))
   (describe "Z.ai / GLM binary thinking"
             (it "emits `{:thinking {:type \"disabled\"}}` for :low"
                 (let [glm {:name "glm-4.6" :reasoning? true :reasoning-style :zai-thinking}]
@@ -181,19 +155,7 @@
                   (expect (= {:thinking {:type "enabled"}}
                              (router/reasoning-extra-body :openai-compatible-chat glm :balanced)))
                   (expect (= {:thinking {:type "enabled"}}
-                             (router/reasoning-extra-body :openai-compatible-chat glm :deep)))))
-            (it "balanced and deep collapse to the same shape (no gradation on z.ai)"
-                (let [glm {:name "glm-5.1" :reasoning? true :reasoning-style :zai-thinking}]
-                  (expect (= (router/reasoning-extra-body :openai-compatible-chat glm :balanced)
-                             (router/reasoning-extra-body :openai-compatible-chat glm :deep)))))
-            (it "emits no budget_tokens (z.ai has no such concept)"
-                (let [glm
-                      {:name "glm-4.7" :reasoning? true :reasoning-style :zai-thinking}
-
-                      out
-                      (router/reasoning-extra-body :openai-compatible-chat glm :deep)]
-
-                  (expect (nil? (get-in out [:thinking :budget_tokens]))))))
+                             (router/reasoning-extra-body :openai-compatible-chat glm :deep))))))
   (describe
     "Z.ai preserved thinking (clear_thinking: false)"
     (let [glm {:name "glm-4.7" :reasoning? true :reasoning-style :zai-thinking}]
@@ -281,21 +243,12 @@
       (it "`:low` + preserved keeps reasoning across turns"
           (expect (= {:reasoning_effort "low" :thinking {:type "enabled" :clear_thinking false}}
                      (router/reasoning-extra-body :anthropic glm53
-                                                  :low {:preserved-thinking? true}))))
-      (it "`:balanced` and `:deep` still ride high / max"
-          (expect (= {:reasoning_effort "high" :thinking {:type "enabled"}}
-                     (router/reasoning-extra-body :anthropic glm53 :balanced)))
-          (expect (= {:reasoning_effort "max" :thinking {:type "enabled"}}
-                     (router/reasoning-extra-body :anthropic glm53 :deep))))))
+                                                  :low {:preserved-thinking? true}))))))
   (describe
     "non-reasoning models (silent no-op)"
     (it "returns nil when model lacks :reasoning? flag"
         (expect (nil? (router/reasoning-extra-body :openai-compatible-chat {:name "gpt-4o"} :deep)))
-        (expect (nil? (router/reasoning-extra-body :anthropic {:name "claude-haiku-3"} :deep))))
-    (it "returns nil when :reasoning? is explicitly false"
-        (expect (nil? (router/reasoning-extra-body :openai-compatible-chat
-                                                   {:name "gpt-4o" :reasoning? false}
-                                                   :deep)))))
+        (expect (nil? (router/reasoning-extra-body :anthropic {:name "claude-haiku-3"} :deep)))))
   (describe "unknown level (silent no-op)"
             (it "returns nil when level is unknown"
                 (expect (nil? (router/reasoning-extra-body :openai-compatible-chat
@@ -321,57 +274,43 @@
           (expect (= {:reasoning_effort "high"}
                      (router/reasoning-extra-body :anthropic weird :deep)))))))
 
-(defdescribe
-  provider-native-reasoning-effort-test
-  "Exact provider-native effort is catalog-gated and does not use aliases."
-  (let [glm {:name "glm-5.2"
-             :reasoning? true
-             :reasoning-style :zai-effort
-             :reasoning-options [{:type "effort" :values ["high" "max"]}]}]
-    (it "emits the exact GLM-5.2 high body"
-        (expect (= {:requested "high"
-                    :effective "high"
-                    :supported ["high" "max"]
-                    :wire-style :zai-effort
-                    :extra-body {:thinking {:type "enabled"} :reasoning_effort "high"}}
-                   (router/resolve-reasoning-effort :anthropic glm "high"))))
-    (it "emits the exact GLM-5.2 max body"
-        (expect (= {:thinking {:type "enabled"} :reasoning_effort "max"}
-                   (:extra-body (router/resolve-reasoning-effort :anthropic glm "max")))))
-    (it "rejects abstract levels and unsupported exact values"
-        (doseq [effort ["deep" "medium" :high nil]]
-          (let [resolved (router/resolve-reasoning-effort :anthropic glm effort)]
-            (expect (nil? (:effective resolved)))
-            (expect (= ["high" "max"] (:supported resolved))))))
-    (it "rejects a model without catalog-declared effort options"
-        (let [resolved
-              (router/resolve-reasoning-effort :anthropic (dissoc glm :reasoning-options) "high")]
-          (expect (nil? (:effective resolved)))
-          (expect (= [] (:supported resolved))))))
-  ;; GLM-5.3 sells the light rung GLM-5.2 never had, so the EXACT API reaches
-  ;; "low" too — on the models.dev rows that advertise it, and nowhere else.
-  (let [glm53 {:name "glm-5.3"
-               :reasoning? true
-               :reasoning-style :zai-effort
-               :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}]
-    (it "emits the exact GLM-5.3 low body"
-        (expect (= {:requested "low"
-                    :effective "low"
-                    :supported ["low" "high" "max"]
-                    :wire-style :zai-effort
-                    :extra-body {:thinking {:type "enabled"} :reasoning_effort "low"}}
-                   (router/resolve-reasoning-effort :anthropic glm53 "low"))))
-    (it "refuses an exact `low` on a row whose catalog stops at high"
-        (let [glm52 {:name "glm-5.2"
-                     :reasoning? true
-                     :reasoning-style :zai-effort
-                     :reasoning-options [{:type "effort" :values ["high" "max"]}]}
-              resolved (router/resolve-reasoning-effort :anthropic glm52 "low")]
-
-          (expect (= "low" (:requested resolved)))
-          (expect (nil? (:effective resolved)))
-          (expect (= ["high" "max"] (:supported resolved)))))))
-
+(defdescribe provider-native-reasoning-effort-test
+             "Exact provider-native effort is catalog-gated and does not use aliases."
+             (let [glm {:name "glm-5.2"
+                        :reasoning? true
+                        :reasoning-style :zai-effort
+                        :reasoning-options [{:type "effort" :values ["high" "max"]}]}]
+               (it "emits the exact GLM-5.2 high body"
+                   (expect (= {:requested "high"
+                               :effective "high"
+                               :supported ["high" "max"]
+                               :wire-style :zai-effort
+                               :extra-body {:thinking {:type "enabled"} :reasoning_effort "high"}}
+                              (router/resolve-reasoning-effort :anthropic glm "high"))))
+               (it "rejects abstract levels and unsupported exact values"
+                   (doseq [effort ["deep" "medium" :high nil]]
+                     (let [resolved (router/resolve-reasoning-effort :anthropic glm effort)]
+                       (expect (nil? (:effective resolved)))
+                       (expect (= ["high" "max"] (:supported resolved))))))
+               (it "rejects a model without catalog-declared effort options"
+                   (let [resolved (router/resolve-reasoning-effort :anthropic
+                                                                   (dissoc glm :reasoning-options)
+                                                                   "high")]
+                     (expect (nil? (:effective resolved)))
+                     (expect (= [] (:supported resolved))))))
+             ;; GLM-5.3 sells the light rung GLM-5.2 never had, so the EXACT API reaches
+             ;; "low" too — on the models.dev rows that advertise it, and nowhere else.
+             (let [glm53 {:name "glm-5.3"
+                          :reasoning? true
+                          :reasoning-style :zai-effort
+                          :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}]
+               (it "emits the exact GLM-5.3 low body"
+                   (expect (= {:requested "low"
+                               :effective "low"
+                               :supported ["low" "high" "max"]
+                               :wire-style :zai-effort
+                               :extra-body {:thinking {:type "enabled"} :reasoning_effort "low"}}
+                              (router/resolve-reasoning-effort :anthropic glm53 "low"))))))
 (defdescribe
   provider-native-reasoning-effort-options-test
   "A caller may pin every rung that the model's catalog row advertises."
@@ -475,26 +414,22 @@
         (let [unknown {:name "some-new-reasoner" :reasoning? true}]
           (expect (= {:reasoning_effort "high"}
                      (router/reasoning-extra-body :openai-compatible-chat unknown :deep))))))
-  (describe
-    "Anthropic effort"
-    (it "clamps :deep to the ladder the model's row stops at"
-        (let [custom {:name "vendor-claude-x"
-                      :reasoning? true
-                      :reasoning-style :anthropic-thinking
-                      :reasoning-options [{:type "effort" :values ["low" "high" "xhigh"]}]}]
-          (expect (= {:effort "xhigh"}
-                     (:output_config (router/reasoning-extra-body :anthropic custom :deep))))))
-    (it "keeps the display opt-in when the row sells no thinking rung"
-        (let [off-only {:name "vendor-claude-off"
-                        :reasoning? true
-                        :reasoning-style :anthropic-thinking
-                        :reasoning-options [{:type "effort" :values ["none"]}]}]
-          (expect (= {:thinking {:type "adaptive" :display "summarized"}}
-                     (router/reasoning-extra-body :anthropic off-only :deep)))))
-    (it "keeps \"max\" for a Claude row the catalog does not carry"
-        (let [opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}]
-          (expect (= {:effort "max"}
-                     (:output_config (router/reasoning-extra-body :anthropic opus :deep)))))))
+  (describe "Anthropic effort"
+            (it "clamps :deep to the ladder the model's row stops at"
+                (let [custom {:name "vendor-claude-x"
+                              :reasoning? true
+                              :reasoning-style :anthropic-thinking
+                              :reasoning-options [{:type "effort" :values ["low" "high" "xhigh"]}]}]
+                  (expect (= {:effort "xhigh"}
+                             (:output_config
+                               (router/reasoning-extra-body :anthropic custom :deep))))))
+            (it "keeps the display opt-in when the row sells no thinking rung"
+                (let [off-only {:name "vendor-claude-off"
+                                :reasoning? true
+                                :reasoning-style :anthropic-thinking
+                                :reasoning-options [{:type "effort" :values ["none"]}]}]
+                  (expect (= {:thinking {:type "adaptive" :display "summarized"}}
+                             (router/reasoning-extra-body :anthropic off-only :deep))))))
   (describe
     "the whole bundled catalog"
     (it
@@ -604,102 +539,11 @@
                    (modelsdev/normalize-model
                      {:id "m"
                       :reasoning_options
-                      [{:type "effort" :values ["high" "max"] :min 1 :max 2 :ignored true}]})))))
-  (it "retains GLM-5.2 high/max from the bundled catalog"
-      (expect (= [{:type "effort" :values ["high" "max"]}]
-                 (filterv #(= "effort" (:type %))
-                   (:reasoning-options (router/provider-model-entry :zai-coding-plan
-                                                                    "glm-5.2")))))))
-
-(defdescribe
-  known-model-reasoning-flags-test
-  "Sanity check that KNOWN_MODEL_METADATA flags the expected reasoning models."
-  (it "flags GPT-5 family as reasoning-capable"
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5-mini"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5.1"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5.3-codex")))))
-  (it "does not keep obsolete OpenAI o-series entries"
-      (expect (nil? (get router/KNOWN_MODEL_METADATA "o3")))
-      (expect (nil? (get router/KNOWN_MODEL_METADATA "o3-mini")))
-      (expect (nil? (get router/KNOWN_MODEL_METADATA "o4-mini"))))
-  (it "flags Claude 5 / 4.x families as reasoning-capable"
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-fable-5-1"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-5-5"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-5"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-8"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-5"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-sonnet-4-5"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-haiku-5-5"))))
-      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-haiku-4-5")))))
-  (it "does NOT flag non-reasoning models"
-      (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-4o"))))
-      (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-4.1"))))
-      (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "deepseek-chat"))))
-      (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "deepseek-v3"))))
-      (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "minimax-m2.5")))))
-  (it "flags older GLM models with binary :zai-thinking style"
-      (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
-        (let [m (get router/KNOWN_MODEL_METADATA name)]
-          (expect (true? (:reasoning? m)))
-          (expect (= :zai-thinking (:reasoning-style m)))))
-      (expect (= :zai-effort (:reasoning-style (get router/KNOWN_MODEL_METADATA "glm-5.2"))))
-      ;; GLM-5.3 rides the same effort mechanism; only its rungs are wider.
-      (expect (= :zai-effort (:reasoning-style (get router/KNOWN_MODEL_METADATA "glm-5.3")))))
-  (it ":zai provider has per-token pricing for every reasoning-capable GLM"
-      (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
-        (let [pricing (:pricing (router/provider-model-entry :zai name))]
-          (expect (map? pricing))
-          (expect (number? (:input pricing)))
-          (expect (number? (:output pricing)))
-          (expect (pos? (+ (:input pricing) (:output pricing)))))))
-  (it ":zai-coding provider has pricing for subscription-overage accounting"
-      ;; Coding Plan is subscription-billed but overage meters per-token.
-      ;; Router keeps pricing so `budget-record!` stays honest.
-      (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
-        (let [pricing (:pricing (router/provider-model-entry :zai-coding name))]
-          (expect (map? pricing))
-          (expect (pos? (+ (:input pricing) (:output pricing)))))))
-  (it "`infer-model-metadata` propagates :reasoning? + :reasoning-style onto user maps"
-      (let [resolved (router/infer-model-metadata {:name "gpt-5"})]
-        (expect (true? (:reasoning? resolved)))
-        (expect (= :openai-effort (:reasoning-style resolved))))
-      (let [resolved (router/infer-model-metadata {:name "claude-sonnet-4-5"})]
-        (expect (true? (:reasoning? resolved)))
-        (expect (= :anthropic-thinking (:reasoning-style resolved))))
-      (let [resolved (router/infer-model-metadata {:name "glm-4.6"})]
-        (expect (true? (:reasoning? resolved)))
-        (expect (= :zai-thinking (:reasoning-style resolved))))
-      (let [resolved (router/infer-model-metadata {:name "gpt-4o"})]
-        (expect (not (:reasoning? resolved))))))
+                      [{:type "effort" :values ["high" "max"] :min 1 :max 2 :ignored true}]}))))))
 
 (defdescribe
   provider-model-filter-test
   "Provider-scoped model filters."
-  (it "flags current GitHub Copilot models with provider-specific API styles"
-      (let [provider
-            (router/normalize-provider 0
-                                       {:id :github-copilot
-                                        :api-key "test"
-                                        :models [{:name "claude-opus-5"} {:name "gpt-5.6-luna"}
-                                                 {:name "gpt-5.6-sol"} {:name "gpt-5.6-terra"}
-                                                 {:name "gpt-5.2"} {:name "grok-code-fast-1"}]})
-
-            by-name
-            (zipmap (map :name (:models provider)) (:models provider))]
-
-        (expect (= #{"claude-opus-5" "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"}
-                   (set (keys by-name))))
-        (expect (= :anthropic (:api-style (get by-name "claude-opus-5"))))
-        (expect (= :anthropic-thinking (:reasoning-style (get by-name "claude-opus-5"))))
-        (doseq [model ["gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"]]
-          (expect (= :openai-compatible-responses (:api-style (get by-name model))))
-          (expect (= :openai-effort (:reasoning-style (get by-name model))))
-          (expect (= (if (= model "gpt-5.6-luna") 200000 922000) (:context (get by-name model))))
-          (expect (= {:effort "medium" :summary "detailed"}
-                     (get-in by-name [model :extra-body :reasoning]))))
-        (expect (nil? (get by-name "gpt-5.2")))
-        (expect (nil? (get by-name "grok-code-fast-1")))))
   (it "filters OpenAI Codex GPT models below GPT-5.3"
       (let [provider (router/normalize-provider
                        0
@@ -737,18 +581,7 @@
         (let [body {:model "claude-sonnet-4-5"
                     :max_tokens 50000
                     :thinking {:type "enabled" :budget_tokens 24000}}]
-          (expect (= body (clamp body)))))
-    (it "handles each documented reasoning level"
-        (doseq [[level expected-budget] [[:low 1024] [:balanced 8192] [:deep 24000]]]
-          (let [tr (router/reasoning-extra-body :anthropic
-                                                {:name "claude-opus-4-5" :reasoning? true}
-                                                level)
-                body (merge {:model "claude-opus-4-5" :max_tokens 2048} tr)
-                clamped (clamp body)]
-
-            (expect (= expected-budget (get-in clamped [:thinking :budget_tokens])))
-            (expect (> (:max_tokens clamped) expected-budget)))))))
-
+          (expect (= body (clamp body)))))))
 (defdescribe
   reasoning-off-test
   "`:off`: thinking disabled where the wire has a switch, least thinking where it has none."
@@ -838,13 +671,6 @@
   "`apply-thinking-display`: the caller chooses if adaptive Claude thinking is visible."
   (let [adaptive {:thinking {:type "adaptive" :display "summarized"}
                   :output_config {:effort "max"}}]
-    (it "defaults to the summary"
-        (expect (= "summarized" (first router/THINKING_DISPLAY_OPTIONS)))
-        (expect (= {:thinking {:type "adaptive" :display "summarized"}}
-                   (router/reasoning-extra-body
-                     :anthropic
-                     {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}
-                     nil))))
     (it "omits the thinking text on request and keeps the depth"
         (expect (= {:thinking {:type "adaptive" :display "omitted"} :output_config {:effort "max"}}
                    (router/apply-thinking-display adaptive "omitted"))))

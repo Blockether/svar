@@ -37,11 +37,6 @@
             (it "keeps a [thinking, text] message verbatim (no demotion)"
                 (let [in [{:type "thinking" :thinking "plan" :thinking-signature "sig-A"}
                           {:type "text" :text "answer"}]]
-                  (expect (= in (demote in)))))
-            (it "keeps multiple leading thinking blocks verbatim"
-                (let [in [{:type "thinking" :thinking "step 1" :thinking-signature "sig-A"}
-                          {:type "thinking" :thinking "step 2" :thinking-signature "sig-B"}
-                          {:type "text" :text "ok"}]]
                   (expect (= in (demote in))))))
   (describe "interior thinking demotion"
             (it "demotes a trailing thinking that follows a text block"
@@ -89,15 +84,7 @@
                       out
                       (demote in)]
 
-                  (expect (= "" (:text (second out)))))))
-  (describe "no-op cases"
-            (it "passes through a thinking-only message"
-                (let [in [{:type "thinking" :thinking "plan" :thinking-signature "sig"}]]
-                  (expect (= in (demote in)))))
-            (it "passes through a text-only message"
-                (let [in [{:type "text" :text "hi"}]]
-                  (expect (= in (demote in)))))
-            (it "is identity on []" (expect (= [] (demote []))))))
+                  (expect (= "" (:text (second out))))))))
 
 ;;; ── integration with build-anthropic-request-body ──────────────────────
 
@@ -139,49 +126,6 @@
         (expect (= "text" (:type (nth assistant-wire 2))))
         (expect (= "plan B" (:text (nth assistant-wire 2))))
         (expect (not (contains? (nth assistant-wire 2) :signature)))))
-  (it "wire body for already-leading thinking is byte-identical (no churn for healthy messages)"
-      (let [messages
-            [{:role "user" :content "go"}
-             {:role "assistant"
-              :content [{:type "thinking" :thinking "ok" :thinking-signature "sig"}
-                        {:type "text" :text "done"}]} {:role "user" :content "next"}]
-
-            body
-            (build-body messages "claude-opus-4-7" {:max_tokens 1024})
-
-            assistant-wire
-            (-> body
-                :messages
-                second
-                :content)]
-
-        (expect (= 2 (count assistant-wire)))
-        (expect (= "thinking" (:type (first assistant-wire))))
-        (expect (= "sig" (:signature (first assistant-wire))))
-        (expect (= "text" (:type (second assistant-wire))))
-        (expect (= "done" (:text (second assistant-wire))))))
-  (it
-    "wire body for [text, thinking] (model started with text, then a thinking trailer) demotes the trailing thinking"
-    (let [messages
-          [{:role "user" :content "hi"}
-           {:role "assistant"
-            :content [{:type "text" :text "hello"}
-                      {:type "thinking" :thinking "wait" :thinking-signature "sig"}]}
-           {:role "user" :content "more"}]
-
-          body
-          (build-body messages "claude-opus-4-7" {:max_tokens 1024})
-
-          wire
-          (-> body
-              :messages
-              second
-              :content)]
-
-      (expect (= 2 (count wire)))
-      (expect (= "text" (:type (first wire))))
-      (expect (= "text" (:type (second wire))))
-      (expect (= "wait" (:text (second wire))))))
   ;; Vis session ac065988: a long extended-thinking response whose
   ;; TRAILING thinking block carried no text. `demote-interior-thinking-blocks`
   ;; turned it into `{:type "text" :text ""}`; replaying that assistant

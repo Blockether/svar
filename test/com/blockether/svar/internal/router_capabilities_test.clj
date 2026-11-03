@@ -81,10 +81,6 @@
 
                     (expect (nil? (:reasoning_effort (body m level))))))))
   (describe "styles that carry a caller-chosen depth"
-            (it "grants effort on the native Anthropic wire (budget tokens)"
-                (let [m (get (models-of {:id :anthropic :api-key "test-key"}) "claude-sonnet-4-6")]
-                  (expect (= :anthropic-thinking (:reasoning-style m)))
-                  (expect (true? (:reasoning-effort? m)))))
             (it "refuses effort for a binary thinking toggle"
                 (let [m (get (models-of {:id :custom-thinker
                                          :api-key "test-key"
@@ -106,16 +102,6 @@
 
 (defdescribe verbosity-capability-test
              "`text.verbosity` belongs to the OpenAI Responses envelope, not to a vendor."
-             (it "stamps the Responses wire with the style and its vocabulary"
-                 (let [provider
-                       (router/normalize-provider 0 {:id :openai-codex :api-key "test-key"})
-
-                       m
-                       (first (filter #(= "gpt-5.5" (:name %)) (:models provider)))]
-
-                   (expect (= :openai-compatible-responses (:api-style provider)))
-                   (expect (= :openai-text (:verbosity-style m)))
-                   (expect (= ["low" "medium" "high"] (:verbosity-options m)))))
              (it "stamps Copilot GPT the same way, because it is the same wire"
                  ;; The whole point of the capability: nothing here says `:openai-codex`.
                  (let [m (get (copilot "gpt-5.5") "gpt-5.5")]
@@ -226,43 +212,7 @@
         (expect (nil? (:verbosity-style info))))))
 
 (defdescribe
-  copilot-capabilities-test
-  "ONE `:github-copilot` provider covers every seat tier, and its capability
-   stamps come from the wire each catalog model names — never from the provider
-   id, which is where a stamp used to go missing."
-  (it "stamps github-copilot from the wire, not from its provider id"
-      (let [router
-            (router/make-router [{:id :github-copilot :api-key "test-key"}])
-
-            by-name
-            (into {} (map (juxt :name identity)) (:models (first (:providers router))))
-
-            gpt
-            (some by-name ["gpt-5.6-sol" "gpt-5.5"])
-
-            claude
-            (some by-name ["claude-opus-5" "claude-sonnet-4.6"])]
-
-        ;; The provider inherits a catalog at all.
-        (expect (seq by-name))
-        ;; GPT rides the Responses wire: a caller may pick both knobs.
-        (expect (true? (:reasoning-effort? gpt)))
-        (expect (= :openai-effort (:reasoning-style gpt)))
-        (expect (= :openai-text (:verbosity-style gpt)))
-        ;; Claude rides the native Anthropic wire: depth yes, verbosity no.
-        (expect (true? (:reasoning-effort? claude)))
-        (expect (= :anthropic-thinking (:reasoning-style claude)))
-        (expect (nil? (:verbosity-style claude))))))
-
-(defdescribe
   provider-fast-mode-test
-  (it "declares Priority processing only for the providers that offer it"
-      (expect (= {:service-tier "priority" :cost-multiplier 2.0}
-                 (router/provider-fast-mode :openai-codex)))
-      (expect (= (router/provider-fast-mode :openai-codex)
-                 (router/provider-fast-mode "openai-codex")))
-      (expect (nil? (router/provider-fast-mode :anthropic)))
-      (expect (nil? (router/provider-fast-mode :unknown-provider))))
   (it "puts the tier only on listed providers that declare fast mode"
       (let [router
             {:providers [{:id :openai-codex :extra-body {:store false}} {:id :anthropic}

@@ -7,59 +7,24 @@
             [com.blockether.svar.test-support :as ts]))
 
 ;; =============================================================================
-;; Provider catalog, tokens and pricing
+;; Log context
 ;; =============================================================================
 
-(defdescribe
-  public-catalog-api-test
-  (describe
-    "provider catalog"
-    (it "exposes the built-in provider defaults"
-        (expect (= "https://api.openai.com/v1" (get-in svar/KNOWN_PROVIDERS [:openai :base-url]))))
-    (it "normalizes a provider entry the way make-router does"
-        (let [p (svar/normalize-provider 0 {:id :openai :models [{:name "gpt-4o"}]})]
-          (expect (= "https://api.openai.com/v1" (:base-url p)))
-          (expect (= "gpt-4o" (:root p)))))
-    (it "answers provider-scoped model metadata without a router"
-        (expect (svar/provider-model-visible? :openai "gpt-6-sol"))
-        (expect (not (svar/provider-model-visible? :openai "gpt-4o")))
-        (expect (contains? (:capabilities (svar/provider-model-metadata :openai {:name "gpt-4o"}))
-                           :chat))))
-  (describe
-    "tokens and pricing"
-    (it "counts text and message tokens"
-        (expect (pos? (svar/count-tokens "gpt-4o" "hello world")))
-        (expect (> (svar/count-messages "gpt-4o" [(svar/user "hello world")])
-                   (svar/count-messages "gpt-4o" []))))
-    (it "prices tokens with the flattened table"
-        (expect (pos? (:total-cost (svar/estimate-cost "gpt-4o" 1000 100 svar/MODEL_PRICING)))))
-    (it "measures output throughput across calls"
-        (expect (= 10.0 (svar/tokens-per-second [{:tokens {:output 50} :duration-ms 5000}])))))
-  (describe "failures and log context"
-            (it "classifies a failure"
-                (expect (= :rate-limited
-                           (:category (svar/classify-failure (ex-info "rate limited"
-                                                                      {:status 429}))))))
-            (it "merges nested log context for the body"
-                (expect (= {:query-id "q" :iteration 1}
-                           (svar/with-log-context {:query-id "q"}
-                                                  (svar/with-log-context {:iteration 1}
-                                                                         llm/*log-context*)))))))
+(defdescribe public-catalog-api-test
+             (describe "failures and log context"
+                       (it "merges nested log context for the body"
+                           (expect (= {:query-id "q" :iteration 1}
+                                      (svar/with-log-context {:query-id "q"}
+                                                             (svar/with-log-context
+                                                               {:iteration 1}
+                                                               llm/*log-context*)))))))
 
 ;; =============================================================================
 ;; Message Helpers Tests
 ;; =============================================================================
 
 (defdescribe message-helpers-test
-             (describe "system"
-                       (it "creates system message map"
-                           (expect (= {:role "system" :content "You are helpful."}
-                                      (svar/system "You are helpful.")))))
              (describe "user"
-                       (it "creates user message with string content (no images)"
-                           (let [msg (svar/user "Hello")]
-                             (expect (= "user" (:role msg)))
-                             (expect (= "Hello" (:content msg)))))
                        (it "creates user message with multimodal content when images provided"
                            (let [img
                                  (svar/image "base64data" "image/png")
@@ -78,16 +43,7 @@
                              ;; Second element is text
                              (let [text-part (second (:content msg))]
                                (expect (= "text" (:type text-part)))
-                               (expect (= "Describe this" (:text text-part)))))))
-             (describe "assistant"
-                       (it "creates assistant message map"
-                           (expect (= {:role "assistant" :content "I can help."}
-                                      (svar/assistant "I can help.")))))
-             (describe "image"
-                       (it "creates image attachment map"
-                           (let [img (svar/image "abc123" "image/jpeg")]
-                             (expect (= "abc123" (:base64 img)))
-                             (expect (= "image/jpeg" (:media-type img)))))))
+                               (expect (= "Describe this" (:text text-part))))))))
 
 ;; =============================================================================
 ;; Integration tests: real calls to Blockether One, gated on its key

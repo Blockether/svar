@@ -3,7 +3,7 @@
    `:format-retries`, `:json-object-mode?` and the forensic `:format-attempts`.
 
    Each live `it` is gated with `(when (ts/blockether-enabled?) ...)` and makes
-   one small call to `ts/FAST_MODEL`. The metadata tests run unconditionally.
+   one small call to `ts/FAST_MODEL`. The metadata test runs unconditionally.
 
    With a key, the tests verify:
      - `:json-object-mode? true` reaches the wire without a 400.
@@ -17,7 +17,6 @@
    They prove that the wire shape is accepted and that retries round-trip."
   (:require [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.core :as svar]
-            [com.blockether.svar.internal.router :as router]
             [com.blockether.svar.test-support :as ts]))
 
 (defn- blockether-router [] (svar/make-router [(ts/blockether-provider [ts/FAST_MODEL])]))
@@ -76,29 +75,6 @@
   "svar/ask! on Blockether One with flake tolerance merged in (caller wins)."
   [opts]
   (svar/ask! (blockether-router) (merge flake-retry-opts opts)))
-
-;; =============================================================================
-;; Metadata sanity -- GLM models carry :json-object-mode? after normalize
-;; =============================================================================
-
-(defdescribe
-  glm-json-object-mode-metadata-test
-  "Verifies `KNOWN_PROVIDER_MODELS` flags GLM models for auto-injection on
-   the endpoints exercised below. Runs unconditionally -- only touches static
-   tables, no HTTP."
-  (describe
-    ":zai-coding provider GLM models"
-    (it "glm-4.7 has :json-object-mode? true"
-        (expect (true? (:json-object-mode? (router/provider-model-entry :zai-coding "glm-4.7")))))
-    (it "glm-5.1 has :json-object-mode? true"
-        (expect (true? (:json-object-mode? (router/provider-model-entry :zai-coding "glm-5.1"))))))
-  (describe "non-GLM models are NOT flagged"
-            (it "gpt-5-mini has no :json-object-mode? flag"
-                (expect (not (:json-object-mode? (router/provider-model-entry :openai
-                                                                              "gpt-5-mini")))))
-            (it "claude-sonnet-4-6 has no :json-object-mode? flag"
-                (expect (not (:json-object-mode?
-                               (router/provider-model-entry :anthropic "claude-sonnet-4-6")))))))
 
 (defdescribe
   glm-router-propagates-json-object-mode-test

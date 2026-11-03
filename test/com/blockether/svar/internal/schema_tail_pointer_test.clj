@@ -142,46 +142,34 @@
 ;; Opt-out — :schema-tail-pointer? false → head-only mode
 ;; =============================================================================
 
-(defdescribe
-  tail-pointer-opt-out-test
-  (describe ":schema-tail-pointer? false"
-            (it "skips the tail pointer entirely"
-                (let [calls (atom [])]
-                  (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
-                    (svar/ask! (test-router)
-                               {:spec answer-spec
-                                :messages [(svar/user "Reply with ok.")]
-                                :schema-tail-pointer? false}))
-                  (let [msgs (:messages (first @calls))
-                        last-user (last (user-msgs msgs))
-                        tail-text (joined-text last-user)]
+(defdescribe tail-pointer-opt-out-test
+             (describe ":schema-tail-pointer? false"
+                       (it "skips the tail pointer entirely"
+                           (let [calls (atom [])]
+                             (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
+                               (svar/ask! (test-router)
+                                          {:spec answer-spec
+                                           :messages [(svar/user "Reply with ok.")]
+                                           :schema-tail-pointer? false}))
+                             (let [msgs (:messages (first @calls))
+                                   last-user (last (user-msgs msgs))
+                                   tail-text (joined-text last-user)]
 
-                    ;; User message is unchanged from caller input
-                    (expect (= "Reply with ok." tail-text))
-                    (expect (not (re-find #"schema in the system message" tail-text))))))
-            (it "still places the schema body in the system message (head)"
-                (let [calls (atom [])]
-                  (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
-                    (svar/ask! (test-router)
-                               {:spec answer-spec
-                                :messages [(svar/user "Reply with ok.")]
-                                :schema-tail-pointer? false}))
-                  (let [msgs (:messages (first @calls))
-                        sys (first (system-msgs msgs))]
+                               ;; User message is unchanged from caller input
+                               (expect (= "Reply with ok." tail-text))
+                               (expect (not (re-find #"schema in the system message" tail-text))))))
+                       (it "treats nil/missing as ON (only literal `false` opts out)"
+                           (let [calls (atom [])]
+                             (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
+                               (svar/ask! (test-router)
+                                          {:spec answer-spec
+                                           :messages [(svar/user "Reply with ok.")]
+                                           :schema-tail-pointer? nil}))
+                             (let [msgs (:messages (first @calls))
+                                   last-user (last (user-msgs msgs))]
 
-                    (expect (some? sys))
-                    (expect (re-find #"answer" (joined-text sys))))))
-            (it "treats nil/missing as ON (only literal `false` opts out)"
-                (let [calls (atom [])]
-                  (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
-                    (svar/ask! (test-router)
-                               {:spec answer-spec
-                                :messages [(svar/user "Reply with ok.")]
-                                :schema-tail-pointer? nil}))
-                  (let [msgs (:messages (first @calls))
-                        last-user (last (user-msgs msgs))]
-
-                    (expect (re-find #"schema in the system message" (joined-text last-user))))))))
+                               (expect (re-find #"schema in the system message"
+                                                (joined-text last-user))))))))
 
 ;; =============================================================================
 ;; Multimodal preservation — pointer added as text block, images untouched

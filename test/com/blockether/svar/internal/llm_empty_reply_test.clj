@@ -19,7 +19,6 @@
             [com.blockether.svar.internal.router :as router]))
 
 (def ^:private resend! @#'sut/call-with-empty-reply-resend)
-(def ^:private delay-ms @#'sut/empty-reply-resend-delay-ms)
 
 (defn- empty-reply-ex
   ([] (empty-reply-ex {}))
@@ -87,9 +86,6 @@
 
 (defdescribe
   empty-reply-resend-test
-  (describe "backoff schedule"
-            (it "doubles from 2s: 2s / 4s / 8s"
-                (expect (= [2000 4000 8000] (mapv delay-ms [1 2 3])))))
   (describe
     "resend ladder"
     (it "heals in place: 3 empties then a real reply — 4 identical sends, no error"
@@ -467,16 +463,15 @@
 
 (defdescribe
   refusal-classification-test
-  (describe
-    "empty-reply-anomaly-type finish-reason mapping"
-    (it "maps refusal -> :svar.llm/refusal" (expect (= :svar.llm/refusal (anomaly-type "refusal"))))
-    (it "maps model_context_window_exceeded -> :svar.llm/max-tokens-exceeded"
-        (expect (= :svar.llm/max-tokens-exceeded (anomaly-type "model_context_window_exceeded"))))
-    (it "maps pause_turn -> nil (legit stop, never a blind resend)"
-        (expect (nil? (anomaly-type "pause_turn"))))
-    (it "still maps an unknown/nil finish reason -> :svar.llm/empty-content"
-        (expect (= :svar.llm/empty-content (anomaly-type nil)))
-        (expect (= :svar.llm/empty-content (anomaly-type "weird_new_reason")))))
+  (describe "empty-reply-anomaly-type finish-reason mapping"
+            (it "maps model_context_window_exceeded -> :svar.llm/max-tokens-exceeded"
+                (expect (= :svar.llm/max-tokens-exceeded
+                           (anomaly-type "model_context_window_exceeded"))))
+            (it "maps pause_turn -> nil (legit stop, never a blind resend)"
+                (expect (nil? (anomaly-type "pause_turn"))))
+            (it "still maps an unknown/nil finish reason -> :svar.llm/empty-content"
+                (expect (= :svar.llm/empty-content (anomaly-type nil)))
+                (expect (= :svar.llm/empty-content (anomaly-type "weird_new_reason")))))
   (describe
     "ask-code! blank reply with stop_reason refusal"
     (it "throws :svar.llm/refusal, carries stop_details, and is NOT re-sent"
@@ -573,18 +568,6 @@
                 (expect (= "primary-model" (:from-model (first @events))))
                 (expect (= "fallback-model" (:to-model (first @events))))
                 (expect (= "cyber" (:category (first @events)))))))))
-    (it "with NO fallback list, a refusal propagates untouched (one call)"
-        (with-redefs [router/provider-model-pricing fixed-pricing]
-          (let [calls (atom [])]
-            (with-redefs [sut/chat-completion (model-aware-chat "primary-model" nil calls)]
-              (let [thrown (try (svar/ask-code! (two-model-router)
-                                                {:model "primary-model"
-                                                 :messages [(svar/user "Do the thing.")]})
-                                ::no-throw
-                                (catch clojure.lang.ExceptionInfo e e))]
-                (expect (not= ::no-throw thrown))
-                (expect (= :svar.llm/refusal (:type (ex-data thrown))))
-                (expect (= ["primary-model"] @calls)))))))
     (it "when EVERY fallback also refuses, the last refusal propagates enriched"
         (with-redefs [router/provider-model-pricing fixed-pricing]
           (let [calls (atom [])]

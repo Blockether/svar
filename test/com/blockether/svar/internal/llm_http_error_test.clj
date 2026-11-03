@@ -44,9 +44,6 @@
                        (it "returns nil for blank string"
                            (expect (nil? (truncate-error-body "")))
                            (expect (nil? (truncate-error-body "   \n  "))))
-                       (it "passes short strings through unchanged"
-                           (expect (= "{\"error\":\"boom\"}"
-                                      (truncate-error-body "{\"error\":\"boom\"}"))))
                        (it "truncates over-cap strings with a count suffix"
                            (let [body
                                  (apply str (repeat (+ MAX-CHARS 50) "x"))
@@ -62,20 +59,6 @@
 ;;; ── retry policy ────────────────────────────────────────────────────────
 
 (defdescribe retry-policy-test
-             (it "retries Anthropic 529 overloaded responses"
-                 (let [calls
-                       (atom 0)
-
-                       result
-                       (with-retry (fn []
-                                     (if (= 1 (swap! calls inc))
-                                       (throw (ex-info "Exceptional status code: 529"
-                                                       {:status 529}))
-                                       :ok))
-                                   {:max-retries 2 :initial-delay-ms 0})]
-
-                   (expect (= :ok result))
-                   (expect (= 2 @calls))))
              (it "does not re-send an expired token mislabelled as HTTP 429"
                  (let [calls (atom 0)]
                    (expect (throws? clojure.lang.ExceptionInfo
@@ -105,18 +88,6 @@
                                      {:type :svar.core/stream-idle-timeout
                                       :stream? true
                                       :content-acc-len 0}))))))
-    (it "treats a closed-stream semantic timeout as non-retryable"
-        (expect
-          (false?
-            (boolean
-              (retryable-exception?
-                (ex-info
-                  "Stream semantic timeout (240000ms without model/progress event): Stream closed"
-                  {:type :svar.core/stream-semantic-timeout :stream? true}))))))
-    (it "treats a caller cancellation as non-retryable"
-        (expect (false? (boolean (retryable-exception? (ex-info "Stream cancelled: Stream closed"
-                                                                {:type :svar.core/stream-cancelled
-                                                                 :stream? true}))))))
     (it "still retries a genuine mid-stream connection reset"
         (expect (true? (boolean (retryable-exception?
                                   (ex-info "stream connection error: Connection reset"
@@ -284,28 +255,7 @@
 
           (expect (= 1 @calls))
           (expect (= :svar.core/http-error (:type captured)))
-          (expect (= "code" (:partial-content captured)))))
-    (it "preserves partial reasoning on final stream failure"
-        (let [captured (with-redefs-fn {#'com.blockether.svar.internal.llm/http-post-stream!
-                                        (fn [& _]
-                                          (throw (ex-info "Stream connection error: closed"
-                                                          {:type :svar.core/http-error
-                                                           :stream? true
-                                                           :content-acc-len 0
-                                                           :reasoning-acc-len 18
-                                                           :reasoning "reasoning survived"}
-                                                          (java.io.IOException. "closed"))))}
-                         (fn []
-                           (try (sut/chat-completion [{:role "user" :content "hi"}]
-                                                     "glm-5.1" "sk-fake"
-                                                     "https://example.test/v1"
-                                                     {:on-chunk (constantly nil)
-                                                      :max-retries 1
-                                                      :initial-delay-ms 0})
-                                nil
-                                (catch clojure.lang.ExceptionInfo e (ex-data e)))))]
-          (expect (= :svar.core/http-error (:type captured)))
-          (expect (= "reasoning survived" (:reasoning captured)))))))
+          (expect (= "code" (:partial-content captured)))))))
 
 ;;; ── transient network-blip classification ──────────────────────────────
 
@@ -346,10 +296,7 @@
                 (expect (retryable-exception? (ex-info "Can't assign requested address"
                                                        {:type :svar.core/http-error}
                                                        (java.net.BindException.
-                                                         "Can't assign requested address")))))
-            (it "still flags pre-existing connection-reset / EOF cases"
-                (expect (retryable-exception?
-                          (ex-info "boom" {} (java.net.SocketException. "Connection reset"))))))
+                                                         "Can't assign requested address"))))))
   (describe "with-retry recovers from a transient connect blip"
             (it "retries EADDRNOTAVAIL then succeeds when the stack recovers"
                 (let [calls

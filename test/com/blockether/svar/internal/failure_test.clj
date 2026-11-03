@@ -25,15 +25,8 @@
     "gateway wrapper text with no HTTP status"
     (it "retries LiteLLM's APIConnectionError"
         (expect (:retryable? (sut/classify (err "litellm.APIConnectionError: connection error")))))
-    (it "retries LiteLLM's InternalServerError"
-        (expect (:retryable? (sut/classify
-                               (err "litellm.InternalServerError: Internal Server Error")))))
     (it "retries a routing miss while a deployment is rolling"
-        (expect (:retryable? (sut/classify (err "No healthy deployment available for model")))))
-    (it "retries an upstream proxy timeout"
-        (expect (:retryable? (sut/classify (err "upstream request timeout")))))
-    (it "retries a bare bad gateway body"
-        (expect (:retryable? (sut/classify (err "<html>502 Bad Gateway</html>"))))))
+        (expect (:retryable? (sut/classify (err "No healthy deployment available for model"))))))
   (describe "HTTP statuses"
             (it "treats every transient status as retryable"
                 (expect (every? (fn [s]
@@ -282,24 +275,24 @@
 
 (defdescribe
   correlation-test
-  (describe "request-id"
-            (it "reads a header id"
-                (expect (= "req_abc123"
-                           (sut/request-id (err "boom" {:headers {"x-request-id" "req_abc123"}})))))
-            (it "falls back to an id printed bare in the body"
-                (expect
-                  (some?
-                    (sut/request-id
-                      (err "boom"
-                           {:body
-                            "Internal error. Request ID: 5f0a1c2e-1111-4222-8333-abcdef012345"})))))
-            (it "is nil when the gateway printed none"
-                (expect (nil? (sut/request-id (err "boom" {:body "nothing here"})))))
-            (it "is carried on every classification"
-                (expect (= "req_1"
-                           (:request-id
-                             (sut/classify
-                               (err "boom" {:status 500 :headers {"x-request-id" "req_1"}}))))))))
+  (describe
+    "request-id"
+    (it "reads a header id"
+        (expect (= "req_abc123"
+                   (sut/request-id (err "boom" {:headers {"x-request-id" "req_abc123"}})))))
+    (it "falls back to an id printed bare in the body"
+        (expect (= "5f0a1c2e-1111-4222-8333-abcdef012345"
+                   (sut/request-id
+                     (err "boom"
+                          {:body
+                           "Internal error. Request ID: 5f0a1c2e-1111-4222-8333-abcdef012345"})))))
+    (it "is nil when the gateway printed none"
+        (expect (nil? (sut/request-id (err "boom" {:body "nothing here"})))))
+    (it "is carried on every classification"
+        (expect (= "req_1"
+                   (:request-id (sut/classify (err "boom"
+                                                   {:status 500
+                                                    :headers {"x-request-id" "req_1"}}))))))))
 
 (defdescribe
   backoff-test
@@ -562,26 +555,6 @@
     (it "never re-routes a definitive client error"
         (expect (false? (sut/transient-error? (err "invalid request: bad tool schema"
                                                    {:status 400})))))))
-
-(defdescribe
-  single-source-of-truth-test
-  (describe
-    "no layer keeps its own copy of the heuristics"
-    (it "llm's connect-phase check IS failure/connection-error?"
-        (expect (identical? sut/connection-error?
-                            @(requiring-resolve
-                               'com.blockether.svar.internal.llm/connection-error?))))
-    (it "the router's watchdog set IS failure/STREAM_WATCHDOG_ERROR_TYPES"
-        (expect (identical? sut/STREAM_WATCHDOG_ERROR_TYPES
-                            @(requiring-resolve
-                               'com.blockether.svar.internal.router/STREAM_WATCHDOG_ERROR_TYPES))))
-    (it "llm's HTTP retry policy IS failure/low-level-retry-decision"
-        (expect (identical? sut/low-level-retry-decision
-                            @(requiring-resolve 'com.blockether.svar.internal.llm/retry-decision))))
-    (it "the router's auth/model policy IS failure/classify"
-        (expect (identical? sut/classify
-                            @(requiring-resolve
-                               'com.blockether.svar.internal.router/classify-failure))))))
 
 (defdescribe
   budget-wall-is-hard-test

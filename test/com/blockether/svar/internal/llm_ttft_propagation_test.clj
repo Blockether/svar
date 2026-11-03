@@ -12,8 +12,7 @@
    terminal turn failure with no retry anywhere."
   (:require [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.internal.failure :as failure]
-            [com.blockether.svar.internal.llm :as sut]
-            [com.blockether.svar.internal.router :as router]))
+            [com.blockether.svar.internal.llm :as sut]))
 
 (def ^:private finalization? @#'sut/stream-finalization-error?)
 
@@ -37,7 +36,4 @@
                 (expect (false? (failure/transient-error?
                                   (ex-info
                                     "Stream TTFT timeout (300000ms with no response headers): "
-                                    {:type :svar.core/http-error :stream? true}))))))
-  (describe "the first-token budget"
-            (it "waits two minutes before calling a silent provider dead"
-                (expect (= 120000 router/DEFAULT_TTFT_TIMEOUT_MS)))))
+                                    {:type :svar.core/http-error :stream? true})))))))

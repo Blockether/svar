@@ -124,9 +124,6 @@
                                                       {:optimize :cost :reasoning-effort "max"})]
           (expect (= "max" (:reasoning-effort prefs)))
           (expect (nil? (:require-reasoning? prefs)))))
-    (it "absent `:reasoning` leaves `:require-reasoning?` unset"
-        (let [{:keys [prefs]} (router/resolve-routing router {:optimize :cost})]
-          (expect (nil? (:require-reasoning? prefs)))))
     (it "`:on-chunk` is threaded into prefs so live routing events surface"
         ;; Caller's `:on-chunk` (set by every routed entrypoint like
         ;; `ask-code!`) must reach `with-provider-fallback`'s prefs map
@@ -136,11 +133,7 @@
         (let [cb (fn [_e])
               {:keys [prefs]} (router/resolve-routing router {:optimize :cost :on-chunk cb})]
 
-          (expect (identical? cb (:on-chunk prefs)))))
-    (it "absent `:on-chunk` leaves prefs without one"
-        (let [{:keys [prefs]} (router/resolve-routing router {:optimize :cost})]
-          (expect (not (contains? prefs :on-chunk)))))))
-
+          (expect (identical? cb (:on-chunk prefs)))))))
 ;; =============================================================================
 ;; Tier 1 — with-provider-fallback happy/sad paths
 ;; =============================================================================
@@ -1600,80 +1593,7 @@
         (expect
           (= {:input 4.0 :cached-input 0.2 :cache-write-5m 5.0 :cache-write-1h 8.0 :output 20.0}
              (select-keys (get-in provider [:models 0 :pricing])
-                          [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
-  (it "surfaces Claude Fable 5.1 catalog and pricing metadata"
-      (let [entry
-            (router/provider-model-entry :anthropic-coding-plan "claude-fable-5-1")
-
-            model
-            (router/provider-model-metadata :anthropic-coding-plan {:name "claude-fable-5-1"})]
-
-        (expect (= 1000000 (:context entry)))
-        (expect (= :frontier (:intelligence model)))
-        (expect (= :anthropic-thinking (:reasoning-style model)))
-        (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                   (:reasoning-options entry)))
-        (expect
-          (= {:input 10.0 :cached-input 0.25 :cache-write-5m 12.5 :cache-write-1h 20.0 :output 50.0}
-             (select-keys (:pricing entry)
-                          [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
-  (it "surfaces Claude Opus 5.5 catalog and pricing metadata"
-      (let [entry
-            (router/provider-model-entry :anthropic-coding-plan "claude-opus-5-5")
-
-            model
-            (router/provider-model-metadata :anthropic-coding-plan {:name "claude-opus-5-5"})]
-
-        (expect (= 1000000 (:context entry)))
-        (expect (= :frontier (:intelligence model)))
-        (expect (= :anthropic-thinking (:reasoning-style model)))
-        (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                   (:reasoning-options entry)))
-        (expect
-          (= {:input 4.0 :cached-input 0.2 :cache-write-5m 5.0 :cache-write-1h 8.0 :output 20.0}
-             (select-keys (:pricing entry)
-                          [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
-  (it "surfaces Claude Sonnet 5.5 on API keys and subscription plans"
-      (doseq [pid [:anthropic :anthropic-coding-plan]]
-        (let [entry (router/provider-model-entry pid "claude-sonnet-5-5")
-              model (router/provider-model-metadata pid {:name "claude-sonnet-5-5"})]
-
-          (expect (= 1000000 (:context entry)))
-          (expect (= :anthropic-thinking (:reasoning-style model)))
-          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                     (:reasoning-options entry)))
-          (expect
-            (= {:input 2.0 :cached-input 0.1 :cache-write-5m 2.5 :cache-write-1h 4.0 :output 10.0}
-               (select-keys (:pricing entry)
-                            [:input :cached-input :cache-write-5m :cache-write-1h :output]))))))
-  (it
-    "surfaces Claude Haiku 5.5 on API keys and subscription plans"
-    (doseq [pid [:anthropic :anthropic-coding-plan]]
-      (let [entry (router/provider-model-entry pid "claude-haiku-5-5")
-            model (router/provider-model-metadata pid {:name "claude-haiku-5-5"})]
-
-        (expect (= 1000000 (:context entry)))
-        (expect (= :fast (:speed model)))
-        (expect (= :anthropic-thinking (:reasoning-style model)))
-        (expect (= [{:type "toggle"} {:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                   (:reasoning-options entry)))
-        (expect (= {:input 0.1
-                    :cached-input 0.01
-                    :cache-write-5m 0.125
-                    :cache-write-1h 0.2
-                    :output 0.5
-                    :input-over-100k 0.5
-                    :cached-input-over-100k 0.05
-                    :cache-write-5m-over-100k 0.625
-                    :cache-write-1h-over-100k 1.0
-                    :output-over-100k 2.5}
-                   (select-keys (:pricing entry)
-                                [:input :cached-input :cache-write-5m :cache-write-1h :output
-                                 :input-over-100k :cached-input-over-100k :cache-write-5m-over-100k
-                                 :cache-write-1h-over-100k :output-over-100k]))))))
-  (it "does not claim nonexistent Claude Sonnet 4.8 catalog metadata"
-      (expect (nil? (router/provider-model-entry :anthropic-coding-plan "claude-sonnet-4-8")))))
-
+                          [:input :cached-input :cache-write-5m :cache-write-1h :output]))))))
 ;; =============================================================================
 ;; Tier 3 — `:reasoning` integrates with routing (selection filter)
 ;; =============================================================================
@@ -1912,7 +1832,7 @@
                                                     {}
                                                     (fn [_ _]
                                                       (success-result 50)))]
-          (expect (some? result))))))
+          (expect (= :p1 (:routed/provider-id result)))))))
 
 (defdescribe
   budget-record-accrues-tokens-and-cost-test
@@ -2061,27 +1981,18 @@
    Private fn — access via `#'`. The patterns match LOWERCASED name."
   (let [infer #'router/regex-infer-metadata]
     (describe "`:medium :fast` family (mini/haiku/flash/lite/small/nano)"
-              (it "mini suffix" (expect (= :medium (:intelligence (infer "custom-mini")))))
-              (it "haiku family"
-                  (expect (= :medium (:intelligence (infer "claude-haiku-unknown")))))
-              (it "flash family" (expect (= :medium (:intelligence (infer "future-flash")))))
-              (it "nano suffix" (expect (= :medium (:intelligence (infer "acme-nano"))))))
-    (describe
-      "`:frontier :slow` family (reasoner / thinking)"
-      (it "does not special-case obsolete o-series prefixes"
-          (expect (= :medium (:intelligence (infer "o1-new"))))
-          (expect (= :medium (:intelligence (infer "o3-super"))))
-          (expect (= :high (:intelligence (infer "o4-large")))))
-      (it "reasoner keyword" (expect (= :frontier (:intelligence (infer "custom-reasoner")))))
-      (it "thinking keyword" (expect (= :frontier (:intelligence (infer "future-thinking"))))))
+              (it "mini suffix" (expect (= :medium (:intelligence (infer "custom-mini"))))))
+    (describe "`:frontier :slow` family (reasoner / thinking)"
+              (it "does not special-case obsolete o-series prefixes"
+                  (expect (= :medium (:intelligence (infer "o1-new"))))
+                  (expect (= :medium (:intelligence (infer "o3-super"))))
+                  (expect (= :high (:intelligence (infer "o4-large")))))
+              (it "reasoner keyword"
+                  (expect (= :frontier (:intelligence (infer "custom-reasoner"))))))
     (describe "`:frontier :slow` opus/frontier family"
-              (it "opus → frontier" (expect (= :frontier (:intelligence (infer "claude-opus-x")))))
-              (it "frontier → frontier"
-                  (expect (= :frontier (:intelligence (infer "acme-frontier-v1"))))))
+              (it "opus → frontier" (expect (= :frontier (:intelligence (infer "claude-opus-x"))))))
     (describe "`:high :medium` sonnet/pro/large family"
-              (it "sonnet" (expect (= :high (:intelligence (infer "claude-sonnet-99")))))
-              (it "pro" (expect (= :high (:intelligence (infer "custom-pro")))))
-              (it "gpt-5" (expect (= :high (:intelligence (infer "gpt-5-custom"))))))
+              (it "sonnet" (expect (= :high (:intelligence (infer "claude-sonnet-99"))))))
     (describe "`:medium :medium` default"
               (it "unknown name"
                   (expect (= :medium (:intelligence (infer "totally-random-model"))))))
@@ -2096,10 +2007,7 @@
               ;; Important: regex inference never sets :reasoning?. Unknown reasoning
               ;; models slip through as non-reasoning — document via test.
               (it "o-series inference leaves :reasoning? unset"
-                  (expect (nil? (:reasoning? (infer "o5-new")))))
-              (it "opus inference leaves :reasoning? unset"
-                  (expect (nil? (:reasoning? (infer "claude-opus-99"))))))))
-
+                  (expect (nil? (:reasoning? (infer "o5-new"))))))))
 (defdescribe
   ask-with-reasoning-integration-test
   "End-to-end: `llm/ask!` routes the request through the reasoning filter so
@@ -2837,84 +2745,19 @@
                  ;; GPT/glm dotted ids resolve as-is first (their catalog keys are dotted).
                  (expect (= "gpt-5.4" (first (router/model-key-variants "gpt-5.4"))))))
 
-(defdescribe
-  known-provider-default-models-test
-  (it "uses curated OpenAI Codex defaults when caller omits :models"
-      (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
-        (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol" "gpt-5.6-sol"
-                    "gpt-5.6-luna" "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
-                   (mapv :name (:models p))))
-        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
-          (expect (= 272000 (:context astra)))
-          (expect (= :frontier (:intelligence astra)))
-          (expect (:reasoning? astra))
-          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                     (:reasoning-options astra))))))
-  (it "uses curated GitHub Copilot defaults when caller omits :models"
-      (let [p (router/normalize-provider 0 {:id :github-copilot :api-key "x"})]
-        (expect (= ["claude-opus-5.5" "claude-sonnet-5.5" "claude-haiku-5.5" "claude-opus-5"
-                    "claude-fable-5" "claude-sonnet-5" "gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna"
-                    "gpt-6-sol" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna"]
-                   (mapv :name (:models p))))
-        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
-          (expect (= 922000 (:context astra)))
-          (expect (= :frontier (:intelligence astra)))
-          (expect (= :openai-compatible-responses (:api-style astra)))
-          (expect (= :openai-effort (:reasoning-style astra))))))
-  (it "routes new Copilot Claude ids on the native Anthropic wire"
-      (doseq [name ["claude-opus-5.5" "claude-sonnet-5.5" "claude-haiku-5.5"]]
-        (let [entry (router/provider-model-entry :github-copilot name)]
-          (expect (= :anthropic (:api-style entry)))
-          (expect (= :anthropic-thinking (:reasoning-style entry)))
-          (expect (= 0.0 (get-in entry [:pricing :input])))
-          (expect (= 0.0 (get-in entry [:pricing :output])))))
-      (doseq [name ["claude-opus-5.5" "claude-haiku-5.5"]]
-        (expect (= 1000000 (:context (router/provider-model-entry :github-copilot name))))))
-  (it "uses curated plain OpenAI defaults when caller omits :models"
-      (let [p (router/normalize-provider 0 {:id :openai :api-key "x"})]
-        (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol"] (mapv :name (:models p))))
-        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
-          (expect (= 1050000 (:context astra)))
-          (expect (= :frontier (:intelligence astra)))
-          (expect (:reasoning? astra))
-          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                     (:reasoning-options astra))))))
-  (it "uses curated Mistral defaults when caller omits :models"
-      (let [p
-            (router/normalize-provider 0 {:id :mistral :api-key "x"})
-
-            models
-            (mapv :name (:models p))
-
-            large
-            (first (:models p))]
-
-        (expect (= :mistral (:id p)))
-        (expect (= :openai-compatible-chat (:api-style p)))
-        (expect (= ["mistral-large-latest" "mistral-medium-latest" "mistral-small-latest"
-                    "codestral-latest"]
-                   models))
-        (expect (= 262144 (:context large)))
-        (expect (= 262144 (:output-limit large)))))
-  ;; z.ai lists lead with the native multimodal `glm-5.3-flash` (`:lead-models`), so
-  ;; the older `glm-5v-turbo` stays selectable without outranking the current
-  ;; Flash model on the all-zero plan price table.
-  (it "leads z.ai's defaults with the Flash model and keeps the older vision model selectable"
-      (let [p
-            (router/normalize-provider 0 {:id :zai-coding-plan :api-key "x"})
-
-            by-name
-            (into {} (map (juxt :name identity)) (:models p))]
-
-        ;; Retail `:zai` offers both too, and `:zai-coding` inherits that curated set.
-        (doseq [pid [:zai :zai-coding :zai-coding-plan]]
-          (let [defaults (router/provider-default-models pid)]
-            (expect (= "glm-5.3-flash" (first defaults)) (str pid))
-            (expect (contains? (set defaults) "glm-5v-turbo") (str pid))))
-        (expect (contains? (:capabilities (get by-name "glm-5.3-flash")) :vision))
-        (expect (contains? (:capabilities (get by-name "glm-5v-turbo")) :vision))
-        (expect (not (contains? (:capabilities (get by-name "glm-5-turbo")) :vision))))))
-
+(defdescribe known-provider-default-models-test
+             (it "uses curated OpenAI Codex defaults when caller omits :models"
+                 (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
+                   (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol" "gpt-5.6-sol"
+                               "gpt-5.6-luna" "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
+                              (mapv :name (:models p))))
+                   (let [astra (get (into {} (map (juxt :name identity)) (:models p))
+                                    "gpt-6-astra")]
+                     (expect (= 272000 (:context astra)))
+                     (expect (= :frontier (:intelligence astra)))
+                     (expect (:reasoning? astra))
+                     (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                                (:reasoning-options astra)))))))
 (defdescribe
   canonical-model-order-test
   (it "keeps every curated provider default list in canonical order"

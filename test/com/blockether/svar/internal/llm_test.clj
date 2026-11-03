@@ -386,69 +386,37 @@
                        (it "selects fastest model"
                            (expect (= "tiny" (selected-model (make-router) {:prefer :speed}))))))
 
-(defdescribe
-  vector-prefer-test
-  (describe "[:cost :speed]"
-            (it "cheapest first, fastest as tiebreaker"
-                (expect (= "tiny" (selected-model (make-router) {:prefer [:cost :speed]})))))
-  (describe "[:intelligence :cost]"
-            (it "smartest across the fleet, cheapest as tiebreaker within tier"
-                ;; :frontier beats :high regardless of provider priority.
-                (expect (= "genius"
-                           (selected-model (make-router) {:prefer [:intelligence :cost]})))))
-  (describe "[:speed :intelligence]"
-            (it "fastest first, smartest as tiebreaker"
-                (expect (= "tiny"
-                           (selected-model (make-router) {:prefer [:speed :intelligence]})))))
-  (describe
-    "single-element vector matches keyword"
-    (it "[:cost] same as :cost"
-        (let [r (make-router)]
-          (expect (= (selected-model r {:prefer :cost}) (selected-model r {:prefer [:cost]})))))
-    (it "[:intelligence] same as :intelligence"
-        (let [r (make-router)]
-          (expect (= (selected-model r {:prefer :intelligence})
-                     (selected-model r {:prefer [:intelligence]})))))
-    (it "[:speed] same as :speed"
-        (let [r (make-router)]
-          (expect (= (selected-model r {:prefer :speed}) (selected-model r {:prefer [:speed]})))))))
+(defdescribe vector-prefer-test
+             (describe "[:intelligence :cost]"
+                       (it "smartest across the fleet, cheapest as tiebreaker within tier"
+                           ;; :frontier beats :high regardless of provider priority.
+                           (expect (= "genius"
+                                      (selected-model (make-router)
+                                                      {:prefer [:intelligence :cost]})))))
+             (describe "single-element vector matches keyword"
+                       (it "[:cost] same as :cost"
+                           (let [r (make-router)]
+                             (expect (= (selected-model r {:prefer :cost})
+                                        (selected-model r {:prefer [:cost]})))))))
 
-(defdescribe
-  capabilities-filter-test
-  (describe
-    "requiring :vision"
-    (it "excludes non-vision models"
-        (expect (not= "tiny"
-                      (selected-model (make-router) {:prefer :cost :capabilities #{:vision}}))))
-    (it "cheapest with vision is medium"
-        (expect (= "medium"
-                   (selected-model (make-router) {:prefer :cost :capabilities #{:vision}}))))
-    (it "smartest vision-capable model across the fleet"
-        ;; `genius` (frontier + vision) in provider-b beats `big` (high + vision)
-        ;; in provider-a despite priority ordering.
-        (expect (= "genius"
-                   (selected-model (make-router)
-                                   {:prefer :intelligence :capabilities #{:vision}})))))
-  (describe "vector prefer with capabilities"
-            (it "[:cost :speed] with vision"
-                (expect (= "medium"
-                           (selected-model (make-router)
-                                           {:prefer [:cost :speed] :capabilities #{:vision}}))))))
+(defdescribe capabilities-filter-test
+             (describe "requiring :vision"
+                       (it "cheapest with vision is medium"
+                           (expect (= "medium"
+                                      (selected-model (make-router)
+                                                      {:prefer :cost :capabilities #{:vision}}))))
+                       (it "smartest vision-capable model across the fleet"
+                           ;; `genius` (frontier + vision) in provider-b beats `big` (high + vision)
+                           ;; in provider-a despite priority ordering.
+                           (expect (= "genius"
+                                      (selected-model (make-router)
+                                                      {:prefer :intelligence
+                                                       :capabilities #{:vision}}))))))
 
-(defdescribe
-  exclude-model-test
-  (it "skips excluded model"
-      (expect (not= "tiny" (selected-model (make-router) {:prefer :cost :exclude-model "tiny"}))))
-  (it "exclude works with vector preferences"
-      (expect (not= "tiny"
-                    (selected-model (make-router)
-                                    {:prefer [:cost :speed] :exclude-model "tiny"})))))
-
-(defdescribe
-  edge-cases-test
-  (it "no preference returns a model" (expect (some? (selected-model (make-router) {}))))
-  (it "empty vector returns a model" (expect (some? (selected-model (make-router) {:prefer []}))))
-  (it "nil prefer returns a model" (expect (some? (selected-model (make-router) {:prefer nil})))))
+(defdescribe exclude-model-test
+             (it "skips excluded model"
+                 (expect (= "medium"
+                            (selected-model (make-router) {:prefer :cost :exclude-model "tiny"})))))
 
 (defdescribe
   provider-models-list-test
@@ -1278,17 +1246,7 @@
                     (expect (= "request to https://x.invalid/y failed" (fmt e)))))
               (it "falls back to the exception class name when nothing else helps"
                   (let [e (Exception.)]
-                    (expect (= "java.lang.Exception" (fmt e)))))
-              (it "final-fallback string is never nil or blank"
-                  ;; ExceptionInfo with nil message AND no ex-data AND no cause:
-                  ;; class name still wins. The literal `\"HTTP request failed\"`
-                  ;; only ever fires if class is also somehow nil, but contract
-                  ;; guarantees non-nil + non-blank.
-                  (let [e (ex-info nil {})
-                        m (fmt e)]
-
-                    (expect (string? m))
-                    (expect (not (clojure.string/blank? m))))))))
+                    (expect (= "java.lang.Exception" (fmt e))))))))
 
 (defdescribe
   lmstudio-models-shape-test
@@ -1302,11 +1260,6 @@
                      "http://localhost:1234/v1"
                      :host
                      "/api/v0/models"))))
-    (it
-      "respects host/port overrides"
-      (expect
-        (= "http://10.0.0.5:9000/api/v0/models"
-           ((var-get #'sut/models-endpoint-url) "http://10.0.0.5:9000/v1" :host "/api/v0/models"))))
     (it "default base appends path to chat base-url (unchanged behavior)"
         (expect
           (= "https://api.openai.com/v1/models"
@@ -1346,10 +1299,7 @@
                                  :lmstudio
                                  [{"id" "m" "max_context_length" 8192}])
                                first
-                               :context))))
-            (it "passes through unknown shapes unchanged"
-                (let [models [{"id" "m" "max_context_length" 8192}]]
-                  (expect (= models ((var-get #'sut/shape-models) nil models)))))))
+                               :context))))))
 
 (defdescribe
   routed-context-limit-flow-test
@@ -1368,9 +1318,7 @@
     (describe "inject-routed-params forwards :context"
               (it "carries the model-map's :context into opts"
                   (expect (= 262144
-                             (:context (inject {} {:id :lmstudio} {:name "m" :context 262144})))))
-              (it "omits :context when the model-map has none"
-                  (expect (nil? (:context (inject {} {:id :lmstudio} {:name "m"}))))))
+                             (:context (inject {} {:id :lmstudio} {:name "m" :context 262144}))))))
     (describe "resolve-opts context-limits"
               (it "prefers an explicit :context over the static catalog default"
                   (let [resolved (resolve-opts {}

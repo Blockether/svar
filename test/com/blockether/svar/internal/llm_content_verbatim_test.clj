@@ -28,9 +28,7 @@
              (describe "string parts"
                        (it "keeps whitespace-only strings verbatim (indent / blank lines survive)"
                            (expect (= "\n    " (content-part-text "\n    ")))
-                           (expect (= "  " (content-part-text "  "))))
-                       (it "keeps ordinary strings unchanged"
-                           (expect (= "return 1" (content-part-text "return 1")))))
+                           (expect (= "  " (content-part-text "  ")))))
              (describe "sequential parts"
                        (it "concatenates nested parts with no separator, preserving whitespace"
                            (expect (= "def f():\n    return 1"

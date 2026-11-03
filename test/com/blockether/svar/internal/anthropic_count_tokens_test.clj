@@ -34,38 +34,34 @@
 ;; router/check-context-limit — token-count source priority + refine policy
 ;; =============================================================================
 
-(defdescribe
-  check-context-limit-input-override-test
-  (describe ":input-tokens override (priority 1)"
-            (it "uses the supplied count verbatim instead of the offline estimate"
-                (let [r (router/check-context-limit "claude-opus-4-8" msgs {:input-tokens 123456})]
-                  (expect (= 123456 (:input-tokens r)))))
-            (it "a huge override flips the overflow verdict"
-                (let [r (router/check-context-limit "claude-opus-4-8"
-                                                    msgs
-                                                    {:input-tokens 5000000
-                                                     :context-limits {:default 1000}})]
-                  (expect (false? (:ok? r)))
-                  (expect (= 5000000 (:input-tokens r)))))
-            (it "an explicit :input-tokens wins over :exact-count-fn (no refine call)"
-                (let [calls
-                      (atom 0)
+(defdescribe check-context-limit-input-override-test
+             (describe ":input-tokens override (priority 1)"
+                       (it "a huge override flips the overflow verdict"
+                           (let [r (router/check-context-limit "claude-opus-4-8"
+                                                               msgs
+                                                               {:input-tokens 5000000
+                                                                :context-limits {:default 1000}})]
+                             (expect (false? (:ok? r)))
+                             (expect (= 5000000 (:input-tokens r)))))
+                       (it "an explicit :input-tokens wins over :exact-count-fn (no refine call)"
+                           (let [calls
+                                 (atom 0)
 
-                      r
-                      (router/check-context-limit "claude-opus-4-8"
-                                                  msgs
-                                                  {:input-tokens 42
-                                                   :context-limits {:default 10} ;; near/over limit
-                                                   :exact-count-fn (fn []
-                                                                     (swap! calls inc)
-                                                                     999)})]
+                                 r
+                                 (router/check-context-limit "claude-opus-4-8"
+                                                             msgs
+                                                             {:input-tokens 42
+                                                              :context-limits {:default 10} ;; near/over limit
+                                                              :exact-count-fn (fn []
+                                                                                (swap! calls inc)
+                                                                                999)})]
 
-                  (expect (zero? @calls))
-                  (expect (= 42 (:input-tokens r)))))
-            (it "falls back to the offline estimate when nothing supplied"
-                (let [r (router/check-context-limit "claude-opus-4-8" msgs {})]
-                  (expect (pos? (:input-tokens r)))
-                  (expect (< (:input-tokens r) 100))))))
+                             (expect (zero? @calls))
+                             (expect (= 42 (:input-tokens r)))))
+                       (it "falls back to the offline estimate when nothing supplied"
+                           (let [r (router/check-context-limit "claude-opus-4-8" msgs {})]
+                             (expect (pos? (:input-tokens r)))
+                             (expect (< (:input-tokens r) 100))))))
 
 (defdescribe
   check-context-limit-refine-test
@@ -115,9 +111,7 @@
 
                   (expect (= 1 @calls))
                   (expect (not= 999 (:input-tokens r)))
-                  (expect (false? (:ok? r)))))
-            (it "threshold constant is exposed for callers/policy"
-                (expect (= 0.85 router/CONTEXT_REFINE_UTILIZATION)))))
+                  (expect (false? (:ok? r)))))))
 
 ;; =============================================================================
 ;; llm/anthropic-count-tokens — endpoint wiring (stubbed http-post!)

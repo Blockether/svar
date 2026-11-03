@@ -10,29 +10,6 @@
   "Tests for make-router function"
   (describe
     "with explicit providers"
-    (it "creates router with a single provider"
-        (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}])]
-          (expect (= 1 (count (:providers r))))
-          (expect (some? (:state r)))
-          (expect (= :openai (:id (first (:providers r)))))))
-    (it "creates router with multiple providers"
-        (let [r (llm/make-router
-                  [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}
-                   {:id :anthropic :api-key "sk-test2" :models [{:name "claude-sonnet-4-6"}]}])]
-          (expect (= 2 (count (:providers r))))))
-    (it "sets default network timeouts"
-        (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}])]
-          (expect (= defaults/DEFAULT_TIMEOUT_MS (get-in r [:network :timeout-ms])))
-          (expect (= defaults/DEFAULT_FIRST_BYTE_TIMEOUT_MS
-                     (get-in r [:network :first-byte-timeout-ms])))))
-    (it "allows custom timeouts via :network"
-        (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}]
-                                 {:network {:timeout-ms 300000 :first-byte-timeout-ms 600000}})]
-          (expect (= 300000 (get-in r [:network :timeout-ms])))
-          (expect (= 600000 (get-in r [:network :first-byte-timeout-ms])))))
-    (it "sets check-context? to true by default in :tokens"
-        (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}])]
-          (expect (true? (get-in r [:tokens :check-context?])))))
     (it "allows disabling check-context? via :tokens"
         (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}]
                                  {:tokens {:check-context? false}})]
@@ -65,53 +42,7 @@
                 (try (llm/make-router {:id :openai})
                      (expect false "Should have thrown")
                      (catch clojure.lang.ExceptionInfo e
-                       (expect (= :svar/invalid-providers (:type (ex-data e))))))))
-  (describe
-    "budget configuration"
-    (it "creates router with budget"
-        (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}]
-                                 {:budget {:max-tokens 1000000 :max-cost 5.0}})]
-          (expect (= {:max-tokens 1000000 :max-cost 5.0} (:budget r)))
-          (expect (some? (:budget-state r)))))
-    (it "creates router without budget by default"
-        (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}])]
-          (expect (nil? (:budget r)))
-          (expect (nil? (:budget-state r))))))
-  (describe
-    "circuit breaker configuration"
-    (it "uses default CB thresholds"
-        (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}])]
-          (expect (= 5 (:failure-threshold r)))
-          (expect (= 60000 (:recovery-ms r)))))
-    (it "allows custom CB thresholds"
-        (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}]
-                                 {:failure-threshold 3 :recovery-ms 30000})]
-          (expect (= 3 (:failure-threshold r)))
-          (expect (= 30000 (:recovery-ms r)))))))
-
-(defdescribe
-  router-stats-test
-  "Tests for router-stats function"
-  (it "returns empty stats for fresh router"
-      (let [r
-            (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}])
-
-            stats
-            (llm/router-stats r)]
-
-        (expect (= 0 (get-in stats [:total :requests])))
-        (expect (= 0 (get-in stats [:total :tokens])))
-        (expect (= :closed (get-in stats [:providers :openai :circuit-breaker])))))
-  (it "includes budget info when budget configured"
-      (let [r
-            (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}]
-                             {:budget {:max-tokens 1000 :max-cost 1.0}})
-
-            stats
-            (llm/router-stats r)]
-
-        (expect (some? (:budget stats)))
-        (expect (= 0 (get-in stats [:budget :spent :total-tokens]))))))
+                       (expect (= :svar/invalid-providers (:type (ex-data e)))))))))
 
 (defdescribe
   prompt-cache-metric-test

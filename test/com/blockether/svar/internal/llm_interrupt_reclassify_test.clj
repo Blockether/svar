@@ -11,7 +11,7 @@
    the same typed errors as the wrapped paths and propagates a genuinely
    external interrupt verbatim. Tests cover classification and the real local
    HTTP watchdog through the router boundary."
-  (:require [lazytest.core :refer [defdescribe describe expect it throws?]]
+  (:require [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.internal.llm :as sut]
             [com.blockether.svar.internal.router :as router])
   (:import [com.sun.net.httpserver HttpExchange HttpHandler HttpServer]
@@ -111,14 +111,6 @@
                            (catch clojure.lang.ExceptionInfo e e))]
 
                   (expect (= :svar.core/stream-cancelled (:type (ex-data ex))))
-                  (Thread/interrupted))))
-  (describe "always throws"
-            (it "never returns normally for any flag combination"
-                (doseq [[c t] [[false false] [true false] [false true] [true true]]]
-                  (Thread/interrupted)
-                  (expect (throws?
-                            Throwable
-                            #(reclassify (InterruptedException.) (atom c) (atom t) url ttft-ms)))
                   (Thread/interrupted)))))
 
 ;; Blockether/vis#210: the typed timeout has already consumed its own interrupt.

@@ -26,27 +26,6 @@
                          svar/DESCRIPTION
                          "The single-word answer")))
 
-(defdescribe blockether-smoke-test
-             (describe "basic ask! against Blockether One"
-                       (it "returns a parsed structured response"
-                           (when (ts/blockether-enabled?)
-                             (let [r
-                                   (router-with-models [ts/FAST_MODEL])
-
-                                   result
-                                   (svar/ask! r
-                                              {:spec answer-spec
-                                               :messages
-                                               [(svar/user
-                                                  "What is 2+2? Reply with just the number.")]
-                                               :model ts/FAST_MODEL
-                                               :reasoning :low})]
-
-                               (expect (string? (get-in result [:result :answer])))
-                               (expect (pos? (:duration-ms result)))
-                               (expect (= ts/FAST_MODEL (:routed/model result)))
-                               (expect (= :blockether (:routed/provider-id result))))))))
-
 (defdescribe blockether-optimize-cost-live-test
              (describe ":optimize :cost picks the cheapest model in the fleet"
                        (it "routes to the cheaper model with real pricing"

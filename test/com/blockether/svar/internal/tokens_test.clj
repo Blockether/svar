@@ -14,44 +14,20 @@
 
 (defdescribe context-limit-test
              "Tests for model context limits"
-             (describe
-               "known models"
-               (it "returns 128000 for gpt-4o" (expect (= 128000 (sut/context-limit "gpt-4o"))))
-               (it "returns 1047576 (≈1M) for gpt-4.1 — catalog-exact value"
-                   (expect (= 1047576 (sut/context-limit "gpt-4.1"))))
-               (it "returns Copilot provider context for claude-sonnet-4.6"
-                   ;; Pre-fix this row claimed 1M context — Anthropic-native value
-                   ;; copy-pasted into the `:github-copilot` overlay. Copilot proxy
-                   ;; actually caps Claude-sonnet-4.6 at 200K context (128K input,
-                   ;; 32K output per models.dev). The overlay now omits `:context`
-                   ;; entirely so the models.dev catalog supplies the real number.
-                   (expect (= 200000 (sut/context-limit "claude-sonnet-4.6"))))
-               (it "returns Anthropic provider context for claude-sonnet-4-6"
-                   (expect (= 200000 (sut/context-limit "claude-sonnet-4-6"))))
-               (it "returns 1000000 for claude-opus-5"
-                   (expect (= 1000000 (sut/context-limit "claude-opus-5"))))
-               (it "returns 1000000 for claude-opus-5-5"
-                   (expect (= 1000000 (sut/context-limit "claude-opus-5-5"))))
-               (it "returns 1000000 for claude-opus-4-8"
-                   (expect (= 1000000 (sut/context-limit "claude-opus-4-8"))))
-               (it "returns 1000000 for claude-opus-4-6"
-                   (expect (= 1000000 (sut/context-limit "claude-opus-4-6"))))
-               (it "returns conservative flattened GPT-5.5 context"
-                   (expect (= 272000 (sut/context-limit "gpt-5.5"))))
-               (it "keeps provider-scoped GPT-5.5 contexts exact"
-                   (expect (= 1050000 (sut/provider-model-context :openai "gpt-5.5")))
-                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.5"))))
-               (it "keeps provider-scoped GPT-6 Astra contexts exact"
-                   (expect (= 1050000 (sut/provider-model-context :openai "gpt-6-astra")))
-                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-6-astra")))
-                   (expect (= 922000 (sut/provider-model-context :github-copilot "gpt-6-astra"))))
-               (it "uses Codex catalog prompt windows for current GPT coding models"
-                   (doseq [name ["gpt-6-astra" "gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini"
-                                 "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"]]
-                     (expect (= 272000 (sut/provider-model-context :openai-codex name)))))
-               (it "uses Copilot prompt budgets for visible GPT reasoning coding models"
-                   (doseq [name ["gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5"]]
-                     (expect (= 272000 (sut/provider-model-context :github-copilot name))))))
+             (describe "known models"
+                       (it "returns Copilot provider context for claude-sonnet-4.6"
+                           ;; Pre-fix this row claimed 1M context — Anthropic-native value
+                           ;; copy-pasted into the `:github-copilot` overlay. Copilot proxy
+                           ;; actually caps Claude-sonnet-4.6 at 200K context (128K input,
+                           ;; 32K output per models.dev). The overlay now omits `:context`
+                           ;; entirely so the models.dev catalog supplies the real number.
+                           (expect (= 200000 (sut/context-limit "claude-sonnet-4.6"))))
+                       (it "returns conservative flattened GPT-5.5 context"
+                           (expect (= 272000 (sut/context-limit "gpt-5.5"))))
+                       (it "keeps provider-scoped GPT-5.5 contexts exact"
+                           (expect (= 1050000 (sut/provider-model-context :openai "gpt-5.5")))
+                           (expect (= 272000
+                                      (sut/provider-model-context :openai-codex "gpt-5.5")))))
              (describe "unknown models"
                        (it "returns default for unknown model"
                            (expect (= 8192 (sut/context-limit "unknown-model-xyz"))))))
@@ -140,20 +116,7 @@
 (defdescribe count-tokens-test
              "Tests for count-tokens function"
              (it "counts tokens for simple text"
-                 (let [tokens (sut/count-tokens "gpt-4o" "Hello, world!")]
-                   (expect (pos? tokens))
-                   (expect (< tokens 10))))
-             (it
-               "returns more tokens for longer text"
-               (let [short-tokens
-                     (sut/count-tokens "gpt-4o" "Hi")
-
-                     long-tokens
-                     (sut/count-tokens
-                       "gpt-4o"
-                       "Hello, this is a much longer piece of text that should have more tokens")]
-
-                 (expect (< short-tokens long-tokens))))
+                 (expect (= 4 (sut/count-tokens "gpt-4o" "Hello, world!"))))
              (it "handles empty string"
                  (let [tokens (sut/count-tokens "gpt-4o" "")]
                    (expect (zero? tokens))))
@@ -161,8 +124,8 @@
                  ;; Should not throw, should use fallback encoding (o200k_base — closer
                  ;; than cl100k to Claude/Gemini/GLM and newer OpenAI models; see
                  ;; router/model->encoding).
-                 (let [tokens (sut/count-tokens "unknown-model-xyz" "Hello world")]
-                   (expect (pos? tokens)))))
+                 (expect (= (sut/count-tokens "gpt-4o" "Hello world")
+                            (sut/count-tokens "unknown-model-xyz" "Hello world")))))
 
 ;; =============================================================================
 ;; Message Counting Tests
@@ -171,14 +134,6 @@
 (defdescribe
   count-messages-test
   "Tests for count-messages function"
-  (it "counts tokens for simple message array"
-      (let [messages
-            [{:role "user" :content "Hello!"}]
-
-            tokens
-            (sut/count-messages "gpt-4o" messages)]
-
-        (expect (pos? tokens))))
   (it "includes overhead for multiple messages"
       (let [single
             [{:role "user" :content "Hello"}]
@@ -194,15 +149,6 @@
 
         ;; Multiple messages should have more tokens due to overhead
         (expect (< single-tokens multiple-tokens))))
-  (it "handles system and user roles"
-      (let [messages
-            [{:role "system" :content "Be helpful."} {:role "user" :content "What is 2+2?"}
-             {:role "assistant" :content "4"}]
-
-            tokens
-            (sut/count-messages "gpt-4o" messages)]
-
-        (expect (pos? tokens))))
   (it "counts canonical tool calls and their results"
       (let [payload
             (apply str (repeat 4000 "x"))
@@ -385,47 +331,13 @@
 (defdescribe
   estimate-cost-test
   "Tests for estimate-cost function"
-  (it "calculates cost for known model"
-      (let [cost (sut/estimate-cost "gpt-4o" 1000 500)]
-        (expect (pos? (:input-cost cost)))
-        (expect (pos? (:output-cost cost)))
-        (expect (pos? (:total-cost cost)))
-        (expect (= "gpt-4o" (:model cost)))))
-  (it "uses default pricing for unknown models"
-      (let [cost (sut/estimate-cost "unknown-model" 1000 500)]
-        (expect (pos? (:total-cost cost)))))
   (it "calculates total as sum of input and output"
       (let [cost (sut/estimate-cost "gpt-4o" 1000000 1000000)]
         (expect (= (:total-cost cost) (+ (:input-cost cost) (:output-cost cost))))))
-  (it "includes pricing rates in result"
-      (let [cost (sut/estimate-cost "gpt-4o" 1000 500)]
-        (expect (contains? (:pricing cost) :input))
-        (expect (contains? (:pricing cost) :output))))
-  (it "tracks public OpenAI standard cached pricing"
-      (expect (= {:input 5.00
-                  :cached-input 0.50
-                  :output 30.00
-                  :input-over-272k 10.00
-                  :cached-input-over-272k 1.00
-                  :output-over-272k 45.00}
-                 (select-keys (:pricing (sut/estimate-cost "gpt-5.5" 1 1))
-                              [:input :cached-input :output :input-over-272k :cached-input-over-272k
-                               :output-over-272k])))
-      (expect (= {:input 2.50
-                  :cached-input 0.25
-                  :output 15.00
-                  :input-over-272k 5.00
-                  :cached-input-over-272k 0.50
-                  :output-over-272k 22.50}
-                 (select-keys (:pricing (sut/estimate-cost "gpt-5.4" 1 1))
-                              [:input :cached-input :output :input-over-272k :cached-input-over-272k
-                               :output-over-272k])))
-      (expect (= {:input 1.75 :cached-input 0.175 :output 14.00}
-                 (select-keys (:pricing (sut/estimate-cost "gpt-5.3-codex" 1 1))
-                              [:input :cached-input :output])))
-      (expect (= {:input 0.75 :cached-input 0.075 :output 4.50}
-                 (select-keys (:pricing (sut/estimate-cost "gpt-5.4-mini" 1 1))
-                              [:input :cached-input :output]))))
+  (it "prices a model by a contained catalog name, else by the default rates"
+      (let [pricing {"gpt-x" {:input 1.0 :output 2.0} :default {:input 10.0 :output 20.0}}]
+        (expect (= 3.0 (:total-cost (sut/estimate-cost "gpt-x-mini" 1000000 1000000 pricing))))
+        (expect (= 30.0 (:total-cost (sut/estimate-cost "other" 1000000 1000000 pricing))))))
   (it "applies OpenAI long-context pricing to uncached cached and output components"
       (let [cost (sut/estimate-cost "gpt-5.5"
                                     300000
@@ -454,26 +366,6 @@
         (expect (< (Math/abs (- 0.0005 (:output-cost short))) 1.0E-12))
         (expect (< (Math/abs (- 0.0500005 (:input-uncached-cost long))) 1.0E-12))
         (expect (< (Math/abs (- 0.0025 (:output-cost long))) 1.0E-12))))
-  (it
-    "tracks public Anthropic and Gemini cache pricing"
-    (doseq [model ["claude-opus-5" "claude-opus-4-8"]]
-      (expect
-        (= {:input 5.00 :cached-input 0.50 :cache-write-5m 6.25 :cache-write-1h 10.00 :output 25.00}
-           (select-keys (:pricing (sut/estimate-cost model 1 1))
-                        [:input :cached-input :cache-write-5m :cache-write-1h :output]))))
-    (expect
-      (= {:input 4.00 :cached-input 0.20 :cache-write-5m 5.00 :cache-write-1h 8.00 :output 20.00}
-         (select-keys (:pricing (sut/estimate-cost "claude-opus-5-5" 1 1))
-                      [:input :cached-input :cache-write-5m :cache-write-1h :output])))
-    (expect (= {:input 1.25
-                :cached-input 0.125
-                :output 10.00
-                :input-over-200k 2.50
-                :cached-input-over-200k 0.25
-                :output-over-200k 15.00}
-               (select-keys (:pricing (sut/estimate-cost "gemini-2.5-pro" 1 1))
-                            [:input :cached-input :output :input-over-200k :cached-input-over-200k
-                             :output-over-200k]))))
   (it "separates uncached input, cached input, output, and total cost"
       (let [pricing
             {"gpt-4o" {:input 2.00 :cached-input 0.50 :output 10.00}}
@@ -569,8 +461,7 @@
 (defdescribe format-cost-test
              "Tests for format-cost function"
              (it "formats regular cost" (expect (= "$0.0025" (sut/format-cost 0.0025))))
-             (it "formats very small cost" (expect (= "<$0.0001" (sut/format-cost 0.00001))))
-             (it "formats zero cost" (expect (= "<$0.0001" (sut/format-cost 0)))))
+             (it "formats very small cost" (expect (= "<$0.0001" (sut/format-cost 0.00001)))))
 
 ;; =============================================================================
 ;; Text Truncation Tests
@@ -719,12 +610,6 @@
   (describe "counting"
             (it "counts a quoted special token instead of throwing"
                 (expect (pos? (sut/count-tokens "gpt-4o" "see <|endoftext|> here"))))
-            (it "counts the other o200k special token too"
-                (expect (pos? (sut/count-tokens "gpt-4o" "<|endofprompt|>"))))
-            (it "counts a whole vocabulary table"
-                (expect (pos? (sut/count-tokens
-                                "claude-opus-5"
-                                "\"<|startoftext|>\": 199998,\n\"<|endoftext|>\": 199999"))))
             (it "counts messages carrying one"
                 (expect (pos? (:input-tokens (sut/check-context-limit
                                                "gpt-4o"

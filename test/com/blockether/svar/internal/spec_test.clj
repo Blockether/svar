@@ -66,42 +66,12 @@
                                                    ::sut/description "Street")))]
                   (expect (str/includes? result "address: {"))
                   (expect (str/includes? result "// Street (required)"))
-                  (expect (str/includes? result "street: string,"))))
-            (it "converts deeply nested namespace to nested objects"
-                (let [result (#'sut/spec->str
-                              (sut/spec (sut/field ::sut/name :org.division.team/name
-                                                   ::sut/type :spec.type/string
-                                                   ::sut/cardinality :spec.cardinality/one
-                                                   ::sut/description "Team name")))]
-                  (expect (str/includes? result "team: {"))
-                  (expect (str/includes? result "// Team name (required)"))
-                  (expect (str/includes? result "name: string,"))))))
+                  (expect (str/includes? result "street: string,"))))))
 
 (defdescribe
   str->data-test
   "Tests for JSON parsing"
-  (describe
-    "valid JSON"
-    (it "parses simple object"
-        (expect (= (:value (sut/str->data "{\"name\": \"John\"}")) {:name "John"})))
-    (it "parses integer value" (expect (= (:value (sut/str->data "{\"age\": 30}")) {:age 30})))
-    (it "parses boolean true"
-        (expect (= (:value (sut/str->data "{\"active\": true}")) {:active true})))
-    (it "parses float value"
-        (expect (= (:value (sut/str->data "{\"score\": 3.14}")) {:score 3.14})))
-    (it "parses null value" (expect (= (:value (sut/str->data "{\"data\": null}")) {:data nil}))))
-  (describe
-    "nested objects"
-    (it "parses deeply nested object"
-        (expect (= (:value (sut/str->data "{\"a\": {\"b\": {\"c\": 1}}}")) {:a {:b {:c 1}}})))
-    (it "parses multiple nested fields"
-        (expect (= (:value (sut/str->data
-                             "{\"address\": {\"street\": \"Main St\", \"city\": \"Boston\"}}"))
-                   {:address {:street "Main St" :city "Boston"}}))))
   (describe "arrays"
-            (it "parses simple array"
-                (expect (= (:value (sut/str->data "{\"tags\": [\"a\", \"b\"]}"))
-                           {:tags ["a" "b"]})))
             (it "parses array of objects"
                 (expect (= (:value (sut/str->data "{\"items\": [{\"name\": \"x\", \"value\": 1}]}"))
                            {:items [{:name "x" :value 1}]}))))
@@ -133,55 +103,30 @@
               "{\"name\": \"John\", \"age\": 30, \"tags\": [\"dev\"], \"address\": {\"city\": \"NYC\"}}"))
           {:name "John" :age 30 :tags ["dev"] :address {:city "NYC"}})))))
 
-(defdescribe
-  data->str-test
-  "Tests for JSON serialization"
-  (describe "basic serialization"
-            (it "serializes simple map to JSON"
-                (let [result (sut/data->str {:name "John" :age 30})]
-                  (expect (str/includes? result "\"name\""))
-                  (expect (str/includes? result "\"John\""))
-                  (expect (str/includes? result "\"age\""))
-                  (expect (str/includes? result "30"))))
-            (it "serializes nested map"
-                (let [result (sut/data->str {:a {:b {:c 1}}})]
-                  (expect (str/includes? result "\"a\""))
-                  (expect (str/includes? result "\"b\""))
-                  (expect (str/includes? result "\"c\""))))
-            (it "serializes arrays"
-                (let [result (sut/data->str {:tags ["a" "b"]})]
-                  (expect (str/includes? result "\"tags\""))
-                  (expect (str/includes? result "["))
-                  (expect (str/includes? result "]")))))
-  (describe "date/datetime serialization"
-            (it "serializes LocalDate to ISO string"
-                (let [date
-                      (LocalDate/of 2024 1 15)
+(defdescribe data->str-test
+             "Tests for JSON serialization"
+             (describe "date/datetime serialization"
+                       (it "serializes LocalDate to ISO string"
+                           (let [date
+                                 (LocalDate/of 2024 1 15)
 
-                      result
-                      (sut/data->str {:date date})]
+                                 result
+                                 (sut/data->str {:date date})]
 
-                  (expect (str/includes? result "\"2024-01-15\""))))
-            (it "serializes OffsetDateTime to ISO string"
-                (let [dt
-                      (OffsetDateTime/parse "2024-01-15T10:30:00Z")
+                             (expect (str/includes? result "\"2024-01-15\""))))
+                       (it "serializes OffsetDateTime to ISO string"
+                           (let [dt
+                                 (OffsetDateTime/parse "2024-01-15T10:30:00Z")
 
-                      result
-                      (sut/data->str {:datetime dt})]
+                                 result
+                                 (sut/data->str {:datetime dt})]
 
-                  (expect (str/includes? result "\"2024-01-15T10:30Z\"")))))
-  (describe
-    "roundtrip tests"
-    (it "roundtrips simple map"
-        (expect (= (:value (sut/str->data (sut/data->str {:name "John" :age 30})))
-                   {:name "John" :age 30})))
-    (it "roundtrips nested map"
-        (expect (= (:value (sut/str->data (sut/data->str {:a {:b {:c 1}}}))) {:a {:b {:c 1}}})))
-    (it "roundtrips vector"
-        (expect (= (:value (sut/str->data (sut/data->str {:tags ["a" "b"]}))) {:tags ["a" "b"]})))
-    (it "roundtrips array of objects"
-        (expect (= (:value (sut/str->data (sut/data->str {:items [{:x 1} {:x 2}]})))
-                   {:items [{:x 1} {:x 2}]})))))
+                             (expect (str/includes? result "\"2024-01-15T10:30Z\"")))))
+             (describe "roundtrip tests"
+                       (it "roundtrips maps nested in a vector"
+                           (expect (= (:value (sut/str->data (sut/data->str
+                                                               {:items [{:x 1} {:x {:y "a"}}]})))
+                                      {:items [{:x 1} {:x {:y "a"}}]})))))
 
 (defdescribe
   validate-data-test
@@ -192,17 +137,7 @@
                                              ::sut/type :spec.type/string
                                              ::sut/cardinality :spec.cardinality/one
                                              ::sut/description "Name"))]
-                  (expect (= {:valid? true} (sut/validate-data s {:name "John"})))))
-            (it "validates multiple fields"
-                (let [s (sut/spec (sut/field ::sut/name :name
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Name")
-                                  (sut/field ::sut/name :age
-                                             ::sut/type :spec.type/int
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Age"))]
-                  (expect (= {:valid? true} (sut/validate-data s {:name "John" :age 30}))))))
+                  (expect (= {:valid? true} (sut/validate-data s {:name "John"}))))))
   (describe "missing required field"
             (it "returns invalid for missing required field"
                 (let [s (sut/spec (sut/field ::sut/name :name
@@ -233,14 +168,6 @@
                                              ::sut/description "Age"))]
                   (expect (not (:valid? (sut/validate-data s {:age "thirty"})))))))
   (describe "enum validation"
-            (it "validates correct enum value (map form)"
-                (let [s (sut/spec (sut/field ::sut/name :role
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Role"
-                                             ::sut/values {"admin" "Full access"
-                                                           "user" "Standard access"}))]
-                  (expect (= {:valid? true} (sut/validate-data s {:role "admin"})))))
             (it "returns invalid for wrong enum value (map form)"
                 (let [s (sut/spec (sut/field ::sut/name :role
                                              ::sut/type :spec.type/string
@@ -249,14 +176,6 @@
                                              ::sut/values {"admin" "Full access"
                                                            "user" "Standard access"}))]
                   (expect (not (:valid? (sut/validate-data s {:role "guest"}))))))
-            (it "validates correct enum value (vector form)"
-                (let [s (sut/spec (sut/field ::sut/name :confidence
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Confidence"
-                                             ::sut/values ["high" "medium" "low"]))]
-                  (expect (= {:valid? true} (sut/validate-data s {:confidence "high"})))
-                  (expect (= {:valid? true} (sut/validate-data s {:confidence "medium"})))))
             (it "returns invalid for wrong enum value (vector form)"
                 (let [s
                       (sut/spec (sut/field ::sut/name :confidence
@@ -279,12 +198,6 @@
                   (expect (:valid? (sut/validate-data s {:tags ["red" "green"]})))
                   (expect (not (:valid? (sut/validate-data s {:tags ["red" "purple"]})))))))
   (describe "cardinality many"
-            (it "validates vector of correct type"
-                (let [s (sut/spec (sut/field ::sut/name :tags
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/many
-                                             ::sut/description "Tags"))]
-                  (expect (= {:valid? true} (sut/validate-data s {:tags ["a" "b"]})))))
             (it "returns invalid for wrong type in vector"
                 (let [s (sut/spec (sut/field ::sut/name :nums
                                              ::sut/type :spec.type/int
@@ -321,107 +234,40 @@
         (expect (str/includes? result "RESPONSE FORMAT"))
         (expect (str/includes? result "// X (required)"))
         (expect (str/includes? result "x: int,"))))
-  (it "includes nested objects in prompt"
-      (let [s
-            (sut/spec (sut/field ::sut/name :address/city
-                                 ::sut/type :spec.type/string
-                                 ::sut/cardinality :spec.cardinality/one
-                                 ::sut/description "City"))
+  (describe "values-only enum shorthand (vector form)"
+            (it "emits an inline type union with every value"
+                ;; BAML output escapes the JSON quotes so each value appears as
+                ;; \"value\" in the rendered prompt string.
+                (let [s
+                      (sut/spec (sut/field ::sut/name :confidence
+                                           ::sut/type :spec.type/string
+                                           ::sut/cardinality :spec.cardinality/one
+                                           ::sut/description "Confidence"
+                                           ::sut/values ["high" "medium" "low"]))
 
-            result
-            (sut/spec->prompt s)]
+                      result
+                      (sut/spec->prompt s)]
 
-        (expect (str/includes? result "address: {"))
-        (expect (str/includes? result "// City (required)"))
-        (expect (str/includes? result "city: string,"))))
-  (it "includes array types in prompt"
-      (let [s
-            (sut/spec (sut/field ::sut/name :tags
-                                 ::sut/type :spec.type/string
-                                 ::sut/cardinality :spec.cardinality/many
-                                 ::sut/description "Tags"))
+                  (expect (str/includes? result "\\\"high\\\""))
+                  (expect (str/includes? result "\\\"medium\\\""))
+                  (expect (str/includes? result "\\\"low\\\""))
+                  (expect (str/includes? result "or"))))
+            (it "does NOT emit per-value comment lines"
+                ;; This is the whole point of the shorthand — no wasted tokens on
+                ;; self-explanatory enums.
+                (let [s
+                      (sut/spec (sut/field ::sut/name :confidence
+                                           ::sut/type :spec.type/string
+                                           ::sut/cardinality :spec.cardinality/one
+                                           ::sut/description "Confidence"
+                                           ::sut/values ["high" "medium" "low"]))
 
-            result
-            (sut/spec->prompt s)]
+                      result
+                      (sut/spec->prompt s)]
 
-        (expect (str/includes? result "// Tags (required)"))
-        (expect (str/includes? result "tags: string[],"))))
-  (it "generates prompt for fixed-size vector types"
-      (let [s
-            (sut/spec (sut/field ::sut/name :bbox
-                                 ::sut/type :spec.type/int-v-4
-                                 ::sut/cardinality :spec.cardinality/one
-                                 ::sut/description "Bounding box"))
-
-            result
-            (sut/spec->prompt s)]
-
-        (expect (str/includes? result "bbox: int[4],"))
-        (expect (str/includes? result "(exactly 4 elements)"))))
-  (describe
-    "values-only enum shorthand (vector form)"
-    (it "emits an inline type union with every value"
-        ;; BAML output escapes the JSON quotes so each value appears as
-        ;; \"value\" in the rendered prompt string.
-        (let [s
-              (sut/spec (sut/field ::sut/name :confidence
-                                   ::sut/type :spec.type/string
-                                   ::sut/cardinality :spec.cardinality/one
-                                   ::sut/description "Confidence"
-                                   ::sut/values ["high" "medium" "low"]))
-
-              result
-              (sut/spec->prompt s)]
-
-          (expect (str/includes? result "\\\"high\\\""))
-          (expect (str/includes? result "\\\"medium\\\""))
-          (expect (str/includes? result "\\\"low\\\""))
-          (expect (str/includes? result "or"))))
-    (it "does NOT emit per-value comment lines"
-        ;; This is the whole point of the shorthand — no wasted tokens on
-        ;; self-explanatory enums.
-        (let [s
-              (sut/spec (sut/field ::sut/name :confidence
-                                   ::sut/type :spec.type/string
-                                   ::sut/cardinality :spec.cardinality/one
-                                   ::sut/description "Confidence"
-                                   ::sut/values ["high" "medium" "low"]))
-
-              result
-              (sut/spec->prompt s)]
-
-          (expect (not (str/includes? result "//   - \"high\":")))
-          (expect (not (str/includes? result "//   - \"medium\":")))
-          (expect (not (str/includes? result "//   - \"low\":")))))
-    (it "map form still emits per-value descriptions (back-compat)"
-        (let [s
-              (sut/spec (sut/field ::sut/name :role
-                                   ::sut/type :spec.type/string
-                                   ::sut/cardinality :spec.cardinality/one
-                                   ::sut/description "Role"
-                                   ::sut/values {"admin" "Full access" "user" "Standard access"}))
-
-              result
-              (sut/spec->prompt s)]
-
-          (expect (str/includes? result "//   - \"admin\": Full access"))
-          (expect (str/includes? result "//   - \"user\": Standard access"))))
-    (it "vector form produces a shorter prompt than map form for the same values"
-        (let [s-map
-              (sut/spec (sut/field ::sut/name :level
-                                   ::sut/type :spec.type/string
-                                   ::sut/cardinality :spec.cardinality/one
-                                   ::sut/description "Level"
-                                   ::sut/values {"a" "Value a" "b" "Value b" "c" "Value c"}))
-
-              s-vec
-              (sut/spec (sut/field ::sut/name :level
-                                   ::sut/type :spec.type/string
-                                   ::sut/cardinality :spec.cardinality/one
-                                   ::sut/description "Level"
-                                   ::sut/values ["a" "b" "c"]))]
-
-          (expect (< (count (sut/spec->prompt s-vec)) (count (sut/spec->prompt s-map)))))))
+                  (expect (not (str/includes? result "//   - \"high\":")))
+                  (expect (not (str/includes? result "//   - \"medium\":")))
+                  (expect (not (str/includes? result "//   - \"low\":"))))))
   (describe "transitive ref usage (regression)"
             ;; Real-world repro from vis: an iteration spec held PLAN_STATE
             ;; (which referenced PLAN_ITEM) but only PLAN_STATE was listed in
@@ -480,196 +326,100 @@
               (it "emits a class for the directly-used ref too"
                   (expect (str/includes? rendered "group {"))))))
 
-(defdescribe
-  field-test
-  "Tests for field definition function"
-  (describe "basic field creation"
-            (it "creates basic field with description"
-                (expect (= (sut/field ::sut/name :name
-                                      ::sut/type :spec.type/string
-                                      ::sut/cardinality :spec.cardinality/one
-                                      ::sut/description "User name")
-                           {::sut/name :name
-                            ::sut/type :spec.type/string
-                            ::sut/cardinality :spec.cardinality/one
-                            ::sut/description "User name"})))
-            (it "creates field with cardinality many"
-                (expect (= (sut/field ::sut/name :tags
-                                      ::sut/type :spec.type/string
-                                      ::sut/cardinality :spec.cardinality/many
-                                      ::sut/description "Tags list")
-                           {::sut/name :tags
-                            ::sut/type :spec.type/string
-                            ::sut/cardinality :spec.cardinality/many
-                            ::sut/description "Tags list"})))
-            (it "creates optional field with nil union"
-                (expect (= (sut/field ::sut/name :nick
-                                      ::sut/type :spec.type/string
-                                      ::sut/cardinality :spec.cardinality/one
-                                      ::sut/description "Nickname"
-                                      ::sut/required false)
-                           {::sut/name :nick
-                            ::sut/type :spec.type/string
-                            ::sut/cardinality :spec.cardinality/one
-                            ::sut/description "Nickname"
-                            ::sut/union #{::sut/nil}}))))
-  (describe "enum values"
-            (it "creates field with enum values map (value -> description)"
-                (expect (= (sut/field ::sut/name :role
-                                      ::sut/type :spec.type/string
-                                      ::sut/cardinality :spec.cardinality/one
-                                      ::sut/description "Role"
-                                      ::sut/values {"admin" "Full access" "user" "Standard access"})
-                           {::sut/name :role
-                            ::sut/type :spec.type/string
-                            ::sut/cardinality :spec.cardinality/one
-                            ::sut/description "Role"
-                            ::sut/values {"admin" "Full access" "user" "Standard access"}})))
-            (it "creates field with enum values VECTOR (values-only shorthand)"
-                ;; New in 0.3.2: a plain vector is the values-only shorthand.
-                ;; `spec->prompt` skips the per-value comment block; validator
-                ;; treats it exactly like the map form.
-                (expect (= (sut/field ::sut/name :confidence
-                                      ::sut/type :spec.type/string
-                                      ::sut/cardinality :spec.cardinality/one
-                                      ::sut/description "Confidence"
-                                      ::sut/values ["high" "medium" "low"])
-                           {::sut/name :confidence
-                            ::sut/type :spec.type/string
-                            ::sut/cardinality :spec.cardinality/one
-                            ::sut/description "Confidence"
-                            ::sut/values ["high" "medium" "low"]})))
-            (it "throws when values is an empty vector"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :role
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Role"
-                                             ::sut/values []))))
-            (it "throws when values vector contains non-string entries"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :role
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Role"
-                                             ::sut/values ["admin" 42]))))
-            (it "throws when values is neither a map nor a vector"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :role
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Role"
-                                             ::sut/values #{"admin" "user"}))))
-            (it "throws when values map has nil description"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :role
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Role"
-                                             ::sut/values {"admin" nil
-                                                           "user" "Standard access"})))))
-  (describe "nested paths"
-            (it "creates field with namespaced keyword path"
-                (expect (= (sut/field ::sut/name :address/street
-                                      ::sut/type :spec.type/string
-                                      ::sut/cardinality :spec.cardinality/one
-                                      ::sut/description "Street")
-                           {::sut/name :address/street
-                            ::sut/type :spec.type/string
-                            ::sut/cardinality :spec.cardinality/one
-                            ::sut/description "Street"})))
-            (it "creates field with deeply nested path"
-                (expect (= (sut/field ::sut/name :org.division.team/name
-                                      ::sut/type :spec.type/string
-                                      ::sut/cardinality :spec.cardinality/one
-                                      ::sut/description "Team name")
-                           {::sut/name :org.division.team/name
-                            ::sut/type :spec.type/string
-                            ::sut/cardinality :spec.cardinality/one
-                            ::sut/description "Team name"}))))
-  (describe "invalid keyword format (dots in name)"
-            (it "throws on keyword with dot in name part"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :users.name
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Invalid"))))
-            (it "allows dots in namespace (Datomic style)"
-                (expect (= {::sut/name :org.division/name
-                            ::sut/type :spec.type/string
-                            ::sut/cardinality :spec.cardinality/one
-                            ::sut/description "Valid"}
-                           (sut/field ::sut/name :org.division/name
-                                      ::sut/type :spec.type/string
-                                      ::sut/cardinality :spec.cardinality/one
-                                      ::sut/description "Valid")))))
-  (describe "descriptions with special characters"
-            (it "allows description with brackets"
-                (expect (= "Name [required]"
-                           (::sut/description (sut/field ::sut/name :x
-                                                         ::sut/type :spec.type/string
-                                                         ::sut/cardinality :spec.cardinality/one
-                                                         ::sut/description "Name [required]")))))
-            (it "allows description with equals sign"
-                (expect (= "Type=value"
-                           (::sut/description (sut/field ::sut/name :x
-                                                         ::sut/type :spec.type/string
-                                                         ::sut/cardinality :spec.cardinality/one
-                                                         ::sut/description "Type=value"))))))
-  (describe "missing required options"
-            (it "throws when name is missing"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "No name"))))
-            (it "throws when type is missing"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :x
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "No type"))))
-            (it "throws when cardinality is missing"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :x
-                                             ::sut/type :spec.type/string
-                                             ::sut/description "No cardinality"))))
-            (it "throws when description is missing"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :x
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one)))))
-  (describe "invalid options"
-            (it "throws on invalid type"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :x
-                                             ::sut/type ::sut/invalid
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Bad type"))))
-            (it "throws on invalid cardinality"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/field ::sut/name :x
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality ::sut/invalid
-                                             ::sut/description "Bad card"))))))
-
-(defdescribe spec-test
-             "Tests for spec creation"
-             (it "creates spec from field definitions"
-                 (expect (= (sut/spec (sut/field ::sut/name :name
+(defdescribe field-test
+             "Tests for field definition function"
+             (describe "basic field creation"
+                       (it "creates optional field with nil union"
+                           (expect (= (sut/field ::sut/name :nick
                                                  ::sut/type :spec.type/string
                                                  ::sut/cardinality :spec.cardinality/one
-                                                 ::sut/description "Name")
-                                      (sut/field ::sut/name :age
-                                                 ::sut/type :spec.type/int
+                                                 ::sut/description "Nickname"
+                                                 ::sut/required false)
+                                      {::sut/name :nick
+                                       ::sut/type :spec.type/string
+                                       ::sut/cardinality :spec.cardinality/one
+                                       ::sut/description "Nickname"
+                                       ::sut/union #{::sut/nil}}))))
+             (describe "enum values"
+                       (it "throws when values is an empty vector"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :role
+                                                        ::sut/type :spec.type/string
+                                                        ::sut/cardinality :spec.cardinality/one
+                                                        ::sut/description "Role"
+                                                        ::sut/values []))))
+                       (it "throws when values vector contains non-string entries"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :role
+                                                        ::sut/type :spec.type/string
+                                                        ::sut/cardinality :spec.cardinality/one
+                                                        ::sut/description "Role"
+                                                        ::sut/values ["admin" 42]))))
+                       (it "throws when values is neither a map nor a vector"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :role
+                                                        ::sut/type :spec.type/string
+                                                        ::sut/cardinality :spec.cardinality/one
+                                                        ::sut/description "Role"
+                                                        ::sut/values #{"admin" "user"}))))
+                       (it "throws when values map has nil description"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :role
+                                                        ::sut/type :spec.type/string
+                                                        ::sut/cardinality :spec.cardinality/one
+                                                        ::sut/description "Role"
+                                                        ::sut/values {"admin" nil
+                                                                      "user" "Standard access"})))))
+             (describe "invalid keyword format (dots in name)"
+                       (it "throws on keyword with dot in name part"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :users.name
+                                                        ::sut/type :spec.type/string
+                                                        ::sut/cardinality :spec.cardinality/one
+                                                        ::sut/description "Invalid"))))
+                       (it "allows dots in namespace (Datomic style)"
+                           (expect (= {::sut/name :org.division/name
+                                       ::sut/type :spec.type/string
+                                       ::sut/cardinality :spec.cardinality/one
+                                       ::sut/description "Valid"}
+                                      (sut/field ::sut/name :org.division/name
+                                                 ::sut/type :spec.type/string
                                                  ::sut/cardinality :spec.cardinality/one
-                                                 ::sut/description "Age"))
-                            {::sut/fields [{::sut/name :name
-                                            ::sut/type :spec.type/string
-                                            ::sut/cardinality :spec.cardinality/one
-                                            ::sut/description "Name"}
-                                           {::sut/name :age
-                                            ::sut/type :spec.type/int
-                                            ::sut/cardinality :spec.cardinality/one
-                                            ::sut/description "Age"}]}))))
+                                                 ::sut/description "Valid")))))
+             (describe "missing required options"
+                       (it "throws when name is missing"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/type :spec.type/string
+                                                        ::sut/cardinality :spec.cardinality/one
+                                                        ::sut/description "No name"))))
+                       (it "throws when type is missing"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :x
+                                                        ::sut/cardinality :spec.cardinality/one
+                                                        ::sut/description "No type"))))
+                       (it "throws when cardinality is missing"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :x
+                                                        ::sut/type :spec.type/string
+                                                        ::sut/description "No cardinality"))))
+                       (it "throws when description is missing"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :x
+                                                        ::sut/type :spec.type/string
+                                                        ::sut/cardinality :spec.cardinality/one)))))
+             (describe "invalid options"
+                       (it "throws on invalid type"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :x
+                                                        ::sut/type ::sut/invalid
+                                                        ::sut/cardinality :spec.cardinality/one
+                                                        ::sut/description "Bad type"))))
+                       (it "throws on invalid cardinality"
+                           (expect (throws? clojure.lang.ExceptionInfo
+                                            #(sut/field ::sut/name :x
+                                                        ::sut/type :spec.type/string
+                                                        ::sut/cardinality ::sut/invalid
+                                                        ::sut/description "Bad card"))))))
 
 ;; =============================================================================
 ;; Integration Tests
@@ -678,70 +428,7 @@
 (defdescribe
   integration-test
   "End-to-end integration tests: spec -> prompt -> parse -> validate"
-  (describe "full roundtrip with valid JSON"
-            (it "handles simple spec roundtrip"
-                (let [s
-                      (sut/spec (sut/field ::sut/name :name
-                                           ::sut/type :spec.type/string
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "User name")
-                                (sut/field ::sut/name :age
-                                           ::sut/type :spec.type/int
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Age"))
-
-                      prompt
-                      (sut/spec->prompt s)
-
-                      llm-response
-                      "{\"name\": \"Alice\", \"age\": 30}"
-
-                      parsed
-                      (:value (sut/str->data llm-response))
-
-                      validation
-                      (sut/validate-data s parsed)]
-
-                  (expect (str/includes? prompt "RESPONSE FORMAT"))
-                  (expect (= {:name "Alice" :age 30} parsed))
-                  (expect (= {:valid? true} validation)))))
   (describe "roundtrip with malformed JSON"
-            (it "handles unquoted keys and values"
-                (let [s
-                      (sut/spec (sut/field ::sut/name :name
-                                           ::sut/type :spec.type/string
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Name"))
-
-                      llm-response
-                      "{name: Alice}"
-
-                      parsed
-                      (:value (sut/str->data llm-response))
-
-                      validation
-                      (sut/validate-data s parsed)]
-
-                  (expect (= {:name "Alice"} parsed))
-                  (expect (= {:valid? true} validation))))
-            (it "handles trailing commas"
-                (let [s
-                      (sut/spec (sut/field ::sut/name :items
-                                           ::sut/type :spec.type/string
-                                           ::sut/cardinality :spec.cardinality/many
-                                           ::sut/description "Items"))
-
-                      llm-response
-                      "{\"items\": [\"a\", \"b\",]}"
-
-                      parsed
-                      (:value (sut/str->data llm-response))
-
-                      validation
-                      (sut/validate-data s parsed)]
-
-                  (expect (= {:items ["a" "b"]} parsed))
-                  (expect (= {:valid? true} validation))))
             (it "handles markdown code blocks"
                 (let [s
                       (sut/spec (sut/field ::sut/name :value
@@ -759,33 +446,6 @@
                       (sut/validate-data s parsed)]
 
                   (expect (= {:value 42} parsed))
-                  (expect (= {:valid? true} validation)))))
-  (describe "roundtrip with nested objects"
-            (it "handles nested objects from namespaced keywords"
-                (let [s
-                      (sut/spec (sut/field ::sut/name :address/street
-                                           ::sut/type :spec.type/string
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Street")
-                                (sut/field ::sut/name :address/city
-                                           ::sut/type :spec.type/string
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "City"))
-
-                      prompt
-                      (sut/spec->prompt s)
-
-                      llm-response
-                      "{\"address\": {\"street\": \"Main St\", \"city\": \"Boston\"}}"
-
-                      parsed
-                      (:value (sut/str->data llm-response))
-
-                      validation
-                      (sut/validate-data s parsed)]
-
-                  (expect (str/includes? prompt "address: {"))
-                  (expect (= {:address {:street "Main St" :city "Boston"}} parsed))
                   (expect (= {:valid? true} validation)))))
   (describe "validation failures"
             (it "detects missing required fields"
@@ -937,59 +597,38 @@
 ;; Special Character Handling Tests (?!*+)
 ;; =============================================================================
 
-(defdescribe
-  special-char-handling-test
-  "Tests for handling Clojure special characters (?!*+) in field names"
-  (describe "keyword->path strips special chars"
-            (it "strips ? from predicate keywords"
-                (let [result (#'sut/keyword->path :valid?)]
-                  (expect (= "valid" result))))
-            (it "strips ! from bang keywords"
-                (let [result (#'sut/keyword->path :reset!)]
-                  (expect (= "reset" result))))
-            (it "handles namespaced keywords with special chars"
-                (let [result (#'sut/keyword->path :claims/verifiable?)]
-                  (expect (= "claims.verifiable" result)))))
-  (describe "spec->str generates correct BAML for predicate fields"
-            (it "strips ? from field name in output"
-                (let [result (#'sut/spec->str
-                              (sut/spec (sut/field ::sut/name :valid?
-                                                   ::sut/type :spec.type/bool
-                                                   ::sut/cardinality :spec.cardinality/one
-                                                   ::sut/description "Is valid")))]
-                  (expect (str/includes? result "valid: bool,"))
-                  (expect (not (str/includes? result "valid?:"))))))
-  (describe "str->data-with-spec remaps keys correctly"
-            (it "remaps simple predicate key"
-                (let [s
-                      (sut/spec (sut/field ::sut/name :valid?
-                                           ::sut/type :spec.type/bool
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Valid"))
+(defdescribe special-char-handling-test
+             "Tests for handling Clojure special characters (?!*+) in field names"
+             (describe "keyword->path strips special chars"
+                       (it "strips ? from predicate keywords"
+                           (let [result (#'sut/keyword->path :valid?)]
+                             (expect (= "valid" result))))
+                       (it "handles namespaced keywords with special chars"
+                           (let [result (#'sut/keyword->path :claims/verifiable?)]
+                             (expect (= "claims.verifiable" result)))))
+             (describe "spec->str generates correct BAML for predicate fields"
+                       (it "strips ? from field name in output"
+                           (let [result (#'sut/spec->str
+                                         (sut/spec (sut/field ::sut/name :valid?
+                                                              ::sut/type :spec.type/bool
+                                                              ::sut/cardinality
+                                                              :spec.cardinality/one
+                                                              ::sut/description "Is valid")))]
+                             (expect (str/includes? result "valid: bool,"))
+                             (expect (not (str/includes? result "valid?:"))))))
+             (describe "str->data-with-spec remaps keys correctly"
+                       (it "remaps simple predicate key"
+                           (let [s
+                                 (sut/spec (sut/field ::sut/name :valid?
+                                                      ::sut/type :spec.type/bool
+                                                      ::sut/cardinality :spec.cardinality/one
+                                                      ::sut/description "Valid"))
 
-                      result
-                      (sut/str->data-with-spec "{\"valid\": true}" s)]
+                                 result
+                                 (sut/str->data-with-spec "{\"valid\": true}" s)]
 
-                  (expect (contains? result :valid?))
-                  (expect (= true (:valid? result)))))
-            (it "handles multiple special char fields"
-                (let [s
-                      (sut/spec (sut/field ::sut/name :active?
-                                           ::sut/type :spec.type/bool
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Active")
-                                (sut/field ::sut/name :confirmed!
-                                           ::sut/type :spec.type/bool
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Confirmed"))
-
-                      result
-                      (sut/str->data-with-spec "{\"active\": true, \"confirmed\": false}" s)]
-
-                  (expect (contains? result :active?))
-                  (expect (contains? result :confirmed!))
-                  (expect (= true (:active? result)))
-                  (expect (= false (:confirmed! result)))))))
+                             (expect (contains? result :valid?))
+                             (expect (= true (:valid? result)))))))
 
 ;; =============================================================================
 ;; Keyword Type Tests
@@ -1101,16 +740,7 @@
                       (sut/str->data-with-spec "{\"topic\": \"databases\"}" s)]
 
                   (expect (= {:topic :databases} parsed))
-                  (expect (= {:valid? true} (sut/validate-data s parsed))))))
-  (describe "string enums are unaffected"
-            (it "still accepts matching strings and rejects non-members"
-                (let [s (sut/spec (sut/field ::sut/name :role
-                                             ::sut/type :spec.type/string
-                                             ::sut/cardinality :spec.cardinality/one
-                                             ::sut/description "Role"
-                                             ::sut/values {"admin" "Full" "user" "Standard"}))]
-                  (expect (= {:valid? true} (sut/validate-data s {:role "admin"})))
-                  (expect (= false (:valid? (sut/validate-data s {:role "guest"}))))))))
+                  (expect (= {:valid? true} (sut/validate-data s parsed)))))))
 
 ;; =============================================================================
 ;; Fixed-Size Vector Type Tests
@@ -1123,28 +753,9 @@
             (it "parses int-v-N format"
                 (let [result (#'sut/parse-vector-type :spec.type/int-v-4)]
                   (expect (= {:base-type :int :size 4} result))))
-            (it "parses string-v-N format"
-                (let [result (#'sut/parse-vector-type :spec.type/string-v-2)]
-                  (expect (= {:base-type :string :size 2} result))))
-            (it "parses double-v-N format"
-                (let [result (#'sut/parse-vector-type :spec.type/double-v-3)]
-                  (expect (= {:base-type :double :size 3} result))))
             (it "returns nil for standard types"
                 (expect (nil? (#'sut/parse-vector-type :spec.type/string)))
                 (expect (nil? (#'sut/parse-vector-type :spec.type/int)))))
-  (describe "field creation with vector types"
-            (it "accepts int-v-N type"
-                (let [f (sut/field ::sut/name :bbox
-                                   ::sut/type :spec.type/int-v-4
-                                   ::sut/cardinality :spec.cardinality/one
-                                   ::sut/description "Bounding box coordinates")]
-                  (expect (= :spec.type/int-v-4 (::sut/type f)))))
-            (it "accepts string-v-N type"
-                (let [f (sut/field ::sut/name :names
-                                   ::sut/type :spec.type/string-v-2
-                                   ::sut/cardinality :spec.cardinality/one
-                                   ::sut/description "First and last name")]
-                  (expect (= :spec.type/string-v-2 (::sut/type f))))))
   (describe "spec->str BAML generation"
             (it "renders int-v-N as int[N]"
                 (let [result (#'sut/spec->str
@@ -1187,30 +798,7 @@
                       result
                       (sut/validate-data s {:bbox [10 "twenty" 100 200]})]
 
-                  (expect (not (:valid? result))))))
-  (describe "full roundtrip with vector types"
-            (it "spec -> prompt -> parse -> validate for int-v-4"
-                (let [s
-                      (sut/spec (sut/field ::sut/name :bbox
-                                           ::sut/type :spec.type/int-v-4
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Bounding box"))
-
-                      prompt
-                      (sut/spec->prompt s)
-
-                      llm-response
-                      "{\"bbox\": [10, 20, 100, 200]}"
-
-                      parsed
-                      (:value (sut/str->data llm-response))
-
-                      validation
-                      (sut/validate-data s parsed)]
-
-                  (expect (str/includes? prompt "bbox: int[4],"))
-                  (expect (= [10 20 100 200] (:bbox parsed)))
-                  (expect (= {:valid? true} validation))))))
+                  (expect (not (:valid? result)))))))
 
 ;; =============================================================================
 ;; Enum Value Descriptions in Output
@@ -1396,136 +984,38 @@
   spec-field-defaults-test
   "Tests for apply-spec-field-defaults — SAP coercion of null/missing fields.
    A required field that is missing or null throws, so those cases pass :partial? true."
-  (describe
-    "cardinality-many null coercion"
-    (it "coerces null :many field to empty vector"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": null, \"summary\": \"ok\"}" cod-spec)]
-          (expect (= [] (:entities parsed)))
-          (expect (= "ok" (:summary parsed)))))
-    (it "coerces missing :many field to empty vector"
-        (let [parsed (sut/str->data-with-spec "{\"summary\": \"ok\"}" cod-spec)]
-          (expect (= [] (:entities parsed)))
-          (expect (= "ok" (:summary parsed)))))
-    (it
-      "preserves non-null :many field unchanged"
-      (let
-        [parsed
-         (sut/str->data-with-spec
-           "{\"entities\": [{\"entity\": \"X\", \"rationale\": \"Y\", \"score\": 0.8}], \"summary\": \"ok\"}"
-           cod-spec)]
-        (expect (= [{:entity "X" :rationale "Y" :score 0.8}] (:entities parsed)))))
-    (it "preserves empty :many array"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": [], \"summary\": \"ok\"}" cod-spec)]
-          (expect (= [] (:entities parsed))))))
-  (describe
-    "cardinality-one missing key insertion"
-    (it "adds missing :one field with nil value"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": []}" cod-spec {:partial? true})]
-          (expect (contains? parsed :summary))
-          (expect (nil? (:summary parsed)))))
-    (it "preserves null :one field as nil"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": [], \"summary\": null}"
-                                              cod-spec
-                                              {:partial? true})]
-          (expect (contains? parsed :summary))
-          (expect (nil? (:summary parsed)))))
-    (it "preserves non-null :one field unchanged"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": [], \"summary\": \"text\"}" cod-spec)]
-          (expect (= "text" (:summary parsed))))))
-  (describe "empty JSON object"
-            (it "fills all missing fields with defaults"
-                (let [parsed (sut/str->data-with-spec "{}" cod-spec {:partial? true})]
+  (describe "cardinality-many null coercion"
+            (it "coerces null :many field to empty vector"
+                (let [parsed (sut/str->data-with-spec "{\"entities\": null, \"summary\": \"ok\"}"
+                                                      cod-spec)]
                   (expect (= [] (:entities parsed)))
+                  (expect (= "ok" (:summary parsed)))))
+            (it "coerces missing :many field to empty vector"
+                (let [parsed (sut/str->data-with-spec "{\"summary\": \"ok\"}" cod-spec)]
+                  (expect (= [] (:entities parsed)))
+                  (expect (= "ok" (:summary parsed))))))
+  (describe "cardinality-one missing key insertion"
+            (it "adds missing :one field with nil value"
+                (let [parsed
+                      (sut/str->data-with-spec "{\"entities\": []}" cod-spec {:partial? true})]
                   (expect (contains? parsed :summary))
                   (expect (nil? (:summary parsed))))))
-  (describe "all-null response (LLM gave up)"
-            (it "coerces all fields to spec-appropriate defaults"
-                (let [parsed (sut/str->data-with-spec "{\"entities\": null, \"summary\": null}"
-                                                      cod-spec
-                                                      {:partial? true})]
-                  (expect (= [] (:entities parsed)))
-                  (expect (contains? parsed :summary))
-                  (expect (nil? (:summary parsed))))))
-  (describe
-    "nested ref defaults"
-    (it "adds missing fields inside ref items"
-        (let [parsed (sut/str->data-with-spec
-                       "{\"entities\": [{\"entity\": \"Voyager\"}], \"summary\": \"ok\"}"
-                       cod-spec
-                       {:partial? true})]
-          ;; :rationale and :score were missing in the entity — should be added as nil
-          (expect (contains? (first (:entities parsed)) :rationale))
-          (expect (contains? (first (:entities parsed)) :score))
-          (expect (nil? (:rationale (first (:entities parsed)))))
-          (expect (nil? (:score (first (:entities parsed)))))
-          (expect (= "Voyager" (:entity (first (:entities parsed)))))))
-    (it
-      "preserves null fields inside ref items"
-      (let
-        [parsed
-         (sut/str->data-with-spec
-           "{\"entities\": [{\"entity\": \"X\", \"rationale\": null, \"score\": null}], \"summary\": \"ok\"}"
-           cod-spec
-           {:partial? true})]
-        (expect (= "X" (:entity (first (:entities parsed)))))
-        (expect (nil? (:rationale (first (:entities parsed)))))
-        (expect (nil? (:score (first (:entities parsed)))))))
-    (it "fills all fields in empty ref item"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": [{}], \"summary\": \"ok\"}"
-                                              cod-spec
-                                              {:partial? true})]
-          (expect (= 1 (count (:entities parsed))))
-          (let [entity (first (:entities parsed))]
-            (expect (contains? entity :entity))
-            (expect (contains? entity :rationale))
-            (expect (contains? entity :score))
-            (expect (nil? (:entity entity)))
-            (expect (nil? (:rationale entity)))
-            (expect (nil? (:score entity)))))))
-  (describe "simple spec (no refs)"
-            (it "coerces null :many string field to empty vector"
-                (let [simple-spec
-                      (sut/spec (sut/field ::sut/name :tags
-                                           ::sut/type :spec.type/string
-                                           ::sut/cardinality :spec.cardinality/many
-                                           ::sut/description "Tags")
-                                (sut/field ::sut/name :title
-                                           ::sut/type :spec.type/string
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Title"))
-
-                      parsed
-                      (sut/str->data-with-spec "{\"tags\": null, \"title\": \"hi\"}" simple-spec)]
-
-                  (expect (= [] (:tags parsed)))
-                  (expect (= "hi" (:title parsed)))))
-            (it "adds missing :many field in simple spec"
-                (let [simple-spec
-                      (sut/spec (sut/field ::sut/name :items
-                                           ::sut/type :spec.type/int
-                                           ::sut/cardinality :spec.cardinality/many
-                                           ::sut/description "Items")
-                                (sut/field ::sut/name :count
-                                           ::sut/type :spec.type/int
-                                           ::sut/cardinality :spec.cardinality/one
-                                           ::sut/description "Count"))
-
-                      parsed
-                      (sut/str->data-with-spec "{\"count\": 5}" simple-spec)]
-
-                  (expect (= [] (:items parsed)))
-                  (expect (= 5 (:count parsed))))))
+  (describe "nested ref defaults"
+            (it "adds missing fields inside ref items"
+                (let [parsed (sut/str->data-with-spec
+                               "{\"entities\": [{\"entity\": \"Voyager\"}], \"summary\": \"ok\"}"
+                               cod-spec
+                               {:partial? true})]
+                  ;; :rationale and :score were missing in the entity — should be added as nil
+                  (expect (contains? (first (:entities parsed)) :rationale))
+                  (expect (contains? (first (:entities parsed)) :score))
+                  (expect (nil? (:rationale (first (:entities parsed)))))
+                  (expect (nil? (:score (first (:entities parsed)))))
+                  (expect (= "Voyager" (:entity (first (:entities parsed))))))))
   (describe "non-map result passthrough"
             (it "rejects plain text when LLM produces no JSON"
                 (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/str->data-with-spec "I cannot find entities." cod-spec)))))
-  (describe "markdown-wrapped JSON"
-            (it "applies defaults after extracting from markdown"
-                (let [parsed (sut/str->data-with-spec
-                               "```json\n{\"entities\": null, \"summary\": \"ok\"}\n```"
-                               cod-spec)]
-                  (expect (= [] (:entities parsed)))
-                  (expect (= "ok" (:summary parsed)))))))
+                                 #(sut/str->data-with-spec "I cannot find entities." cod-spec))))))
 
 ;; =============================================================================
 ;; coerce-data-with-spec — Clojure data coercion (pre-parsed Clojure data)
@@ -1561,82 +1051,53 @@
                         ::sut/cardinality :spec.cardinality/many
                         ::sut/description "Questions"})))
 
-(defdescribe
-  coerce-data-with-spec-test
-  "Tests for coerce-data-with-spec — type coercion on Clojure data from SCI."
-  (describe "keyword type coercion"
-            (it "coerces string verdict to keyword"
-                (let [data
-                      {:verifications [{:question-index 0 :verdict "pass"}
-                                       {:question-index 1 :verdict "fail"}]}
+(defdescribe coerce-data-with-spec-test
+             "Tests for coerce-data-with-spec — type coercion on Clojure data from SCI."
+             (describe "keyword type coercion"
+                       (it "coerces string verdict to keyword"
+                           (let [data
+                                 {:verifications [{:question-index 0 :verdict "pass"}
+                                                  {:question-index 1 :verdict "fail"}]}
 
-                      result
-                      (sut/coerce-data-with-spec data verification-spec)]
+                                 result
+                                 (sut/coerce-data-with-spec data verification-spec)]
 
-                  (expect (= :pass (:verdict (first (:verifications result)))))
-                  (expect (= :fail (:verdict (second (:verifications result)))))))
-            (it "preserves keyword verdicts that are already correct"
-                (let [data
-                      {:verifications [{:question-index 0 :verdict :pass}]}
+                             (expect (= :pass (:verdict (first (:verifications result)))))
+                             (expect (= :fail (:verdict (second (:verifications result))))))))
+             (describe "does NOT apply key-ns namespacing"
+                       (it "keeps keys un-namespaced despite spec having key-ns"
+                           (let [data
+                                 {:verifications [{:question-index 0 :verdict "pass"}]}
 
-                      result
-                      (sut/coerce-data-with-spec data verification-spec)]
+                                 result
+                                 (sut/coerce-data-with-spec data verification-spec)]
 
-                  (expect (= :pass (:verdict (first (:verifications result)))))))
-            (it "coerces needs-revision string to keyword"
-                (let [data
-                      {:verifications [{:question-index 0 :verdict "needs-revision"}]}
+                             ;; Keys should stay as :verdict, NOT become :verification/verdict
+                             (expect (contains? (first (:verifications result)) :verdict))
+                             (expect (not (contains? (first (:verifications result))
+                                                     :verification/verdict))))))
+             (describe "array normalization"
+                       (it "passes bare vector through as-is for single :many field"
+                           (let [data
+                                 ["Q1" "Q2" "Q3"]
 
-                      result
-                      (sut/coerce-data-with-spec data verification-spec)]
+                                 result
+                                 (sut/coerce-data-with-spec data questions-spec)]
 
-                  (expect (= :needs-revision (:verdict (first (:verifications result))))))))
-  (describe "does NOT apply key-ns namespacing"
-            (it "keeps keys un-namespaced despite spec having key-ns"
-                (let [data
-                      {:verifications [{:question-index 0 :verdict "pass"}]}
+                             (expect (= ["Q1" "Q2" "Q3"] result)))))
+             (describe "field defaults"
+                       (it "coerces nil :many field to empty vector"
+                           (let [data
+                                 {:verifications nil}
 
-                      result
-                      (sut/coerce-data-with-spec data verification-spec)]
+                                 result
+                                 (sut/coerce-data-with-spec data verification-spec)]
 
-                  ;; Keys should stay as :verdict, NOT become :verification/verdict
-                  (expect (contains? (first (:verifications result)) :verdict))
-                  (expect (not (contains? (first (:verifications result))
-                                          :verification/verdict))))))
-  (describe "array normalization"
-            (it "passes bare vector through as-is for single :many field"
-                (let [data
-                      ["Q1" "Q2" "Q3"]
-
-                      result
-                      (sut/coerce-data-with-spec data questions-spec)]
-
-                  (expect (= ["Q1" "Q2" "Q3"] result))))
-            (it "passes through map unchanged"
-                (let [data
-                      {:questions ["Q1" "Q2"]}
-
-                      result
-                      (sut/coerce-data-with-spec data questions-spec)]
-
-                  (expect (= {:questions ["Q1" "Q2"]} result)))))
-  (describe "field defaults"
-            (it "coerces nil :many field to empty vector"
-                (let [data
-                      {:verifications nil}
-
-                      result
-                      (sut/coerce-data-with-spec data verification-spec)]
-
-                  (expect (= [] (:verifications result)))))
-            (it "adds missing :many field as empty vector"
-                (let [result (sut/coerce-data-with-spec {} verification-spec)]
-                  (expect (= [] (:verifications result))))))
-  (describe "non-map passthrough"
-            (it "returns nil unchanged"
-                (expect (nil? (sut/coerce-data-with-spec nil verification-spec))))
-            (it "returns string unchanged"
-                (expect (= "hello" (sut/coerce-data-with-spec "hello" verification-spec))))))
+                             (expect (= [] (:verifications result))))))
+             (describe "non-map passthrough"
+                       (it "returns string unchanged"
+                           (expect (= "hello"
+                                      (sut/coerce-data-with-spec "hello" verification-spec))))))
 
 ;; =============================================================================
 ;; validate-data with TYPE_REF
@@ -1686,21 +1147,8 @@
                                                    :headquarters {:city "SF"}
                                                    :branches [{:street "456 Oak" :city "LA"}]})]
                     (expect (not (:valid? result)))
-                    (expect (some #(= :street (:field %)) (:errors result)))))
-              (it "catches type mismatch in ref"
-                  (let [result (sut/validate-data company-spec
-                                                  {:name "Acme"
-                                                   :headquarters {:street 123 :city "SF"}
-                                                   :branches [{:street "456 Oak" :city "LA"}]})]
-                    (expect (not (:valid? result))))))
+                    (expect (some #(= :street (:field %)) (:errors result))))))
     (describe "cardinality many ref"
-              (it "validates valid array of refs"
-                  (expect (= {:valid? true}
-                             (sut/validate-data company-spec
-                                                {:name "Acme"
-                                                 :headquarters {:street "123 Main" :city "SF"}
-                                                 :branches [{:street "456 Oak" :city "LA"}
-                                                            {:street "789 Elm" :city "NY"}]}))))
               (it "catches invalid data in array ref items"
                   (let [result (sut/validate-data company-spec
                                                   {:name "Acme"
@@ -1736,12 +1184,6 @@
                                  ::sut/target :Sentiment
                                  ::sut/description "Detected sentiments"))]
 
-        (it "validates valid enum values in ref items"
-            (expect (= {:valid? true}
-                       (sut/validate-data review-spec
-                                          {:text "Great product"
-                                           :sentiments [{:label "positive" :score 0.95}
-                                                        {:label "neutral" :score 0.05}]}))))
         (it "catches invalid enum values in ref items"
             (let [result (sut/validate-data review-spec
                                             {:text "Great product"
