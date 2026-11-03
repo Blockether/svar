@@ -60,8 +60,7 @@
          ;; order so the quicker lane is an explicit pick, never the automatic default.
          :lead-models ["glm-5.3-flash"]
          :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"} {:name "glm-5.3-flashx"}
-                          {:name "glm-5.2"} {:name "glm-5.1"} {:name "glm-5-turbo"}
-                          {:name "glm-5v-turbo"}]}
+                          {:name "glm-5.1"} {:name "glm-5-turbo"} {:name "glm-5v-turbo"}]}
    :zai-coding {:base-url "https://api.z.ai/api/anthropic/v1"
                 :api-style :anthropic
                 ;; Coding Plan endpoint, but for budget accounting we use
@@ -90,7 +89,7 @@
                      ;; entitlement rather than a catalog fact — but never ahead of Flash.
                      :lead-models ["glm-5.3-flash"]
                      :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"}
-                                      {:name "glm-5.3-flashx"} {:name "glm-5.2"} {:name "glm-5.1"}
+                                      {:name "glm-5.3-flashx"} {:name "glm-5.1"}
                                       {:name "glm-5-turbo"} {:name "glm-5v-turbo"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
    ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
