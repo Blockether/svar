@@ -5064,9 +5064,9 @@
   [tokens rate]
   (* (/ (double (max 0 (long (or tokens 0)))) 1000000.0) (double (or rate 0.0))))
 
-(defn- tier-rate
-  "Some providers price full requests differently when prompt/input size
-   crosses a public threshold. `selector-tokens` is prompt/input size."
+(defn- tiered-rate
+  "Rate of the long-input tier of `k` that `selector-tokens` reaches, or nil.
+   Some providers price full requests differently above a public input size."
   [pricing k selector-tokens]
   (let [selector-tokens
         (long (or selector-tokens 0))
@@ -5082,12 +5082,21 @@
 
     (or (when (> selector-tokens 272000) (get pricing over-272k))
         (when (> selector-tokens 200000) (get pricing over-200k))
-        (when (> selector-tokens 100000) (get pricing over-100k))
-        (get pricing k))))
+        (when (> selector-tokens 100000) (get pricing over-100k)))))
+
+(defn- tier-rate
+  "Rate of `k` for a request of `selector-tokens` input: its reached tier, else its base."
+  [pricing k selector-tokens]
+  (or (tiered-rate pricing k selector-tokens) (get pricing k)))
 
 (defn- cache-write-rate
+  "`:cache-write` and `:cache-write-5m` name one 5-minute rate. A reached tier of either
+   beats both base rates, because models.dev tiers only `cache_write`."
   [pricing ttl input-tokens]
-  (or (tier-rate pricing (if (= :1h ttl) :cache-write-1h :cache-write-5m) input-tokens)
+  (or (if (= :1h ttl)
+        (tier-rate pricing :cache-write-1h input-tokens)
+        (or (some #(tiered-rate pricing % input-tokens) [:cache-write-5m :cache-write])
+            (get pricing :cache-write-5m)))
       (tier-rate pricing :cache-write input-tokens)
       (tier-rate pricing :input input-tokens)))
 
