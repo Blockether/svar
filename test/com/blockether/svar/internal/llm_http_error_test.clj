@@ -26,16 +26,25 @@
 ;;; ── helper ─────────────────────────────────────────────────────────────
 
 (def ^:private truncate-error-body @#'sut/truncate-error-body)
+
 (def ^:private with-retry @#'sut/with-retry)
+
 (def ^:private MAX-CHARS @#'sut/MAX_HTTP_ERROR_BODY_CHARS)
+
 ;; Transport-level classification now lives in ONE place (`internal.failure`);
 ;; `llm` and `router` only delegate, so these tests target the source of truth.
 (def ^:private retryable-exception? failure/transport-retryable?)
+
 (def ^:private transient-network-error? failure/transient-network-error?)
+
 (def ^:private connection-error? failure/connection-error?)
+
 (def ^:private connection-error->ex-info failure/connection-error->ex-info)
+
 (def ^:private mark-connection-healthy! failure/mark-connection-healthy!)
+
 (def ^:private host-connect-health* failure/host-connect-health*)
+
 (def ^:private healthy-host-connect-blip? failure/healthy-host-connect-blip?)
 
 (defdescribe truncate-error-body-test
@@ -175,6 +184,35 @@
 
           (expect (= 2 @calls))
           (expect (= "ok" (:content result)))))
+    (it "retries a TLS handshake that the peer ends before the request is sent (#447)"
+        ;; A real socket: the peer accepts each connection and closes it at once, so the
+        ;; JDK throws `SSLHandshakeException: Remote host terminated the handshake`.
+        ;; Nothing reached the model, so each attempt of the ladder may run.
+        (let [server
+              (java.net.ServerSocket. 0)
+
+              accepts
+              (atom 0)
+
+              acceptor
+              (future (try (while true
+                             (with-open [_ (.accept server)]
+                               (swap! accepts inc)))
+                           (catch java.io.IOException _ nil)))]
+
+          (try (let [error (try (sut/chat-completion
+                                  [{:role "user" :content "hi"}]
+                                  "glm-5.1"
+                                  "sk-fake"
+                                  (str "https://127.0.0.1:" (.getLocalPort server) "/v1")
+                                  {:on-chunk (constantly nil) :max-retries 3 :initial-delay-ms 0})
+                                (catch clojure.lang.ExceptionInfo e e))]
+                 (expect (= "Remote host terminated the handshake" (ex-message error)))
+                 (expect (= 3 @accepts))
+                 ;; The wrapped error has no cause; its text still names the drop.
+                 (expect (= :transport-drop (:category (failure/classify error))))
+                 (expect (failure/transient-error? error)))
+               (finally (.close server) (future-cancel acceptor)))))
     (it
       "retries a pre-response 'received no bytes' drop (proxy/tunnel closed before responding, NO :stream?)"
       ;; The peer accepted the connection but closed the socket before the first

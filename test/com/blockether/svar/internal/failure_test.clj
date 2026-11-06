@@ -678,3 +678,34 @@
                        [:svar.core/stream-ttft-timeout :svar.core/stream-idle-timeout
                         :svar.core/stream-semantic-timeout :svar.core/stream-truncated
                         :svar.core/http-error])))))
+
+(defdescribe
+  tls-handshake-drop-test
+  ;; #447: a TLS handshake that the peer ends early failed the whole turn as `:unknown`.
+  (it "retries a handshake drop as a pre-response transport drop, also as text alone"
+      (doseq [e [(javax.net.ssl.SSLHandshakeException. "Remote host terminated the handshake")
+                 (java.io.IOException. "Remote host terminated the handshake"
+                                       (javax.net.ssl.SSLHandshakeException.
+                                         "Remote host terminated the handshake"))
+                 (err "Remote host terminated the handshake" {:type :svar.core/http-error})
+                 (err "Remote host closed connection during handshake"
+                      {:type :svar.core/http-error})]]
+        (expect (= :transport-drop (:category (sut/classify e))))
+        (expect (false? (:reached-model? (sut/classify e))))
+        (expect (:retry? (sut/low-level-retry-decision e)))
+        (expect (= :router-owned-transient
+                   (:no-retry-reason
+                     (sut/low-level-retry-decision e {:router-handles-transients? true}))))
+        (expect (sut/transient-error? e))))
+  (it "keeps a certificate failure hard"
+      (doseq [msg ["PKIX path building failed: unable to find valid certification path"
+                   "Received fatal alert: certificate_unknown"
+                   "No subject alternative names matching IP address 127.0.0.1 found"]]
+        (let [e (javax.net.ssl.SSLHandshakeException. msg)]
+          (expect (false? (:retry? (sut/low-level-retry-decision e))) msg)
+          (expect (false? (sut/transient-error? e)) msg))))
+  (it "does not replay a handshake drop after streamed output"
+      (expect (= :output-already-streamed
+                 (:no-retry-reason (sut/low-level-retry-decision
+                                     (err "Remote host terminated the handshake"
+                                          {:type :svar.core/http-error :content-acc-len 12})))))))

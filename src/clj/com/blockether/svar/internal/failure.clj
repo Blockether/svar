@@ -137,6 +137,17 @@
    "try again later" "please try again" "capacity" "throttlingexception" "modelnotreadyexception"
    "serviceunavailableexception" "internalserverexception"])
 
+(def ^:private TLS_HANDSHAKE_DROP_PATTERN
+  "The peer closed the connection during the TLS handshake: the JDK
+   `SSLHandshakeException` texts `Remote host terminated the handshake` and
+   `Remote host closed connection during handshake`. The request was not sent yet.
+   `anomaly/fault!` drops the cause, so the text is the only evidence after a wrap.
+   A certificate failure (`PKIX path building failed`, `certificate_unknown`) does
+   not match: an unchanged retry fails the same way."
+  "remote host (?:terminated the|closed connection during) handshake")
+
+(def ^:private TLS_HANDSHAKE_DROP_RE (re-pattern TLS_HANDSHAKE_DROP_PATTERN))
+
 (def ^:private PRE_RESPONSE_DROP_PATTERNS
   "The connection died BEFORE any response bytes arrived: the model never saw
    the request, so a retry is not just safe, it is idempotent by construction.
@@ -146,7 +157,7 @@
    "server disconnected" "remote end closed connection" "connection reset by peer"
    "connection reset" "connection aborted" "socket hang up" "premature close"
    "peer closed connection" "eof occurred" "stream closed before response"
-   "unexpected end of stream" "goaway" "connection closed before"])
+   "unexpected end of stream" "goaway" "connection closed before" TLS_HANDSHAKE_DROP_PATTERN])
 
 (def RETRYABLE_TRANSIENT_MESSAGE_PATTERN
   "Regex over an error's already-lower-cased message+body marking a transient
@@ -1264,6 +1275,9 @@
              ;; it is the safest retry of all.
              (str/includes? msg-lower "received no bytes")
              (str/includes? cause-lower "received no bytes")
+             ;; The TLS handshake ended early: the request was not sent yet.
+             (re-find TLS_HANDSHAKE_DROP_RE msg-lower)
+             (re-find TLS_HANDSHAKE_DROP_RE cause-lower)
              (and (:stream? data)
                   (or (str/includes? msg-lower "stream connection error")
                       (str/includes? msg-lower "connection reset")
