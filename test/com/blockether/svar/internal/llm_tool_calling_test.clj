@@ -465,6 +465,33 @@
         (expect (= 2 (count out)))
         (expect (= "a" (:id (first out))))
         (expect (= {"x" 1} (:input (second out))))))
+  (it "keeps id and name when later fragments repeat them as blank strings"
+      ;; Alibaba compatible-mode (deepseek-v4-pro) sends "id" "" and "name" ""
+      ;; on every fragment after the first.
+      (let [frags
+            [{"index" 0
+              "id" "call_a"
+              "type" "function"
+              "function" {"name" "run_python" "arguments" ""}}
+             {"index" 0
+              "id" ""
+              "type" "function"
+              "function" {"name" "" "arguments" "{\"code\": \"print(1)\"}"}}
+             {"index" 1
+              "id" "call_b"
+              "type" "function"
+              "function" {"name" "run_python" "arguments" ""}}
+             {"index" 1
+              "id" ""
+              "type" "function"
+              "function" {"name" "" "arguments" "{\"code\": \"print(2)\"}"}}]
+
+            out
+            (assemble-chat-frags frags)]
+
+        (expect (= [{:id "call_a" :name "run_python" :input {"code" "print(1)"}}
+                    {:id "call_b" :name "run_python" :input {"code" "print(2)"}}]
+                   out))))
   (it "merge-provider-state accumulates openai-chat fragments across chunks"
       (let [a
             {:provider :openai-chat

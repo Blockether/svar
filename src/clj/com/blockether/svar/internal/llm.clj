@@ -2827,15 +2827,20 @@
 (defn- assemble-chat-tool-call-fragments
   "Reassemble streamed OpenAI chat `delta.tool_calls[]` fragments into canonical
    tool calls. Fragments are paired by `:index`; `:id`/`:name` arrive on the
-   first fragment, `:arguments` as a string concatenated across fragments."
+   first fragment, `:arguments` as a string concatenated across fragments.
+   A blank `:id`/`:name` on a later fragment (Alibaba compatible-mode sends
+   `\"\"`) never overwrites the first one."
   [fragments]
   (->> fragments
        (reduce (fn [acc fragment]
                  (let [id
-                       (get fragment "id")
+                       (not-empty (get fragment "id"))
 
                        f
                        (get fragment "function")
+
+                       tool-name
+                       (not-empty (get f "name"))
 
                        idx
                        (or (get fragment "index") 0)]
@@ -2844,8 +2849,8 @@
                      id
                      (assoc-in [idx :id] id)
 
-                     (get f "name")
-                     (assoc-in [idx :name] (get f "name"))
+                     tool-name
+                     (assoc-in [idx :name] tool-name)
 
                      true
                      (update-in [idx :arguments] (fnil str "") (or (get f "arguments") "")))))
@@ -6090,10 +6095,11 @@
                         (get delta "reasoning_summary"))
           tool-frags (get delta "tool_calls")
           first-tool-frag (first tool-frags)
-          tool-name (get-in first-tool-frag ["function" "name"])
+          tool-name (not-empty (get-in first-tool-frag ["function" "name"]))
+          tool-call-id (not-empty (get first-tool-frag "id"))
           tool-call-preview (not-empty (cond-> {}
-                                         (get first-tool-frag "id")
-                                         (assoc :id (get first-tool-frag "id"))
+                                         tool-call-id
+                                         (assoc :id tool-call-id)
 
                                          tool-name
                                          (assoc :name tool-name)))]
