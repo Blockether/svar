@@ -1809,6 +1809,19 @@
 
           (expect (= {:reasoning 99 :estimated? true}
                      (get-in data [:api-usage :output-tokens-details])))))
+    (it "uses the thinking tokens that Anthropic reports, not an estimate"
+        (let [extract
+              (var-get #'sut/extract-anthropic-response-data)
+
+              data
+              (extract {:parsed {"content" [{"type" "thinking" "thinking" "" "signature" "sig"}
+                                            {"type" "text" "text" "ok"}]
+                                 "stop_reason" "end_turn"
+                                 "usage" {"input_tokens" 5
+                                          "output_tokens" 337
+                                          "output_tokens_details" {"thinking_tokens" 334}}}})]
+
+          (expect (= {:reasoning 334} (get-in data [:api-usage :output-tokens-details])))))
     (it "still closes a stream that only pings outside a thinking block"
         (let [error (try (complete! (concat [message-start] (repeat 30 ping) text-answer)
                                     (fn [_]))

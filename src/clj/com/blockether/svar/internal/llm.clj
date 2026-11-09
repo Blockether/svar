@@ -2055,12 +2055,13 @@
       {:role "assistant" :content canonical})))
 
 (defn- with-anthropic-reasoning-estimate
-  "Anthropic usage has no thinking-token count: `output_tokens` holds the thinking,
-   the text and the tool input together. When the reply has a thinking block, put
-   the output tokens minus the estimated tokens of the visible text and tool input
-   in `[:output-tokens-details :reasoning]`, with `:estimated? true`. The thinking
-   text itself cannot be counted: the summarized display shows only a summary and
-   the omitted display shows nothing."
+  "Anthropic reports thinking tokens in `output_tokens_details.thinking_tokens`;
+   Anthropic-compatible endpoints can omit that field. Then `output_tokens` holds
+   the thinking, the text and the tool input together. When the reply has a
+   thinking block and no reported count, put the output tokens minus the estimated
+   tokens of the visible text and tool input in `[:output-tokens-details :reasoning]`,
+   with `:estimated? true`. The thinking text itself cannot be counted: the
+   summarized display shows only a summary and the omitted display shows nothing."
   [api-usage assistant-message]
   (let [blocks
         (:content assistant-message)
@@ -2068,7 +2069,9 @@
         output
         (:output-tokens api-usage)]
 
-    (if (and output (some #(= "thinking" (:type %)) blocks))
+    (if (and output
+             (nil? (get-in api-usage [:raw "output_tokens_details" "thinking_tokens"]))
+             (some #(= "thinking" (:type %)) blocks))
       (let [visible (transduce
                       (map (fn [{:keys [type text name input]}]
                              (case type

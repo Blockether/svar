@@ -122,6 +122,9 @@
    Anthropic is ADDITIVE: `input_tokens` excludes cached AND
    cache_creation. To get a TOTAL we sum all three.
 
+   Thinking tokens are a subset of `output_tokens`, reported under
+   `output_tokens_details.thinking_tokens`.
+
    `usage` is the raw `:usage` object from an Anthropic response
    (`message_start.message.usage`, top-level `:usage` on non-stream,
    or a `message_delta.usage` delta). Missing fields are treated as 0.
@@ -144,6 +147,7 @@
                         :cache-write cache-write
                         :cache-read cache-read
                         :output-tokens (get usage "output_tokens")
+                        :reasoning (get-in usage ["output_tokens_details" "thinking_tokens"])
                         :raw usage}))))
 
 (defn gemini-canonical
