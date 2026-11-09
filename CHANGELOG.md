@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.226] - 2026-11-09
+
+### Changed
+- fix(usage): read the thinking tokens that Anthropic reports
+- release: update version files for v0.7.225, bump to next dev version
+
+
 ## [v0.7.225] - 2026-11-09
 
 ### Changed
@@ -2978,7 +2985,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.225...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.226...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -3236,3 +3243,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.223]: https://github.com/Blockether/svar/releases/tag/v0.7.223
 [v0.7.224]: https://github.com/Blockether/svar/releases/tag/v0.7.224
 [v0.7.225]: https://github.com/Blockether/svar/releases/tag/v0.7.225
+[v0.7.226]: https://github.com/Blockether/svar/releases/tag/v0.7.226
