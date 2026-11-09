@@ -1786,6 +1786,29 @@
           ;; Each ping, plus `message_start`: it also moves the semantic deadline.
           (expect (= 4 (count (filter :thinking-alive? @chunks))))
           (expect (every? #(= "" (:content %)) (filter :thinking-alive? @chunks)))))
+    (it "counts hidden thinking as reasoning: the output tokens that no visible text holds"
+        ;; Anthropic usage has no thinking count. 500 output tokens minus 1 for "ok" (o200k).
+        (let [result (complete! (concat [message-start thinking-start]
+                                        thinking-end
+                                        (butlast (butlast text-answer))
+                                        [{"type" "message_delta"
+                                          "delta" {"stop_reason" "end_turn"}
+                                          "usage" {"output_tokens" 500}} {"type" "message_stop"}])
+                                (fn [_]))]
+          (expect (= {:reasoning 499 :estimated? true}
+                     (get-in result [:api-usage :output-tokens-details])))))
+    (it "counts hidden thinking as reasoning in a reply that is not streamed"
+        (let [extract
+              (var-get #'sut/extract-anthropic-response-data)
+
+              data
+              (extract {:parsed {"content" [{"type" "thinking" "thinking" "" "signature" "sig"}
+                                            {"type" "text" "text" "ok"}]
+                                 "stop_reason" "end_turn"
+                                 "usage" {"input_tokens" 5 "output_tokens" 100}}})]
+
+          (expect (= {:reasoning 99 :estimated? true}
+                     (get-in data [:api-usage :output-tokens-details])))))
     (it "still closes a stream that only pings outside a thinking block"
         (let [error (try (complete! (concat [message-start] (repeat 30 ping) text-answer)
                                     (fn [_]))

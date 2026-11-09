@@ -2054,6 +2054,41 @@
     (let [canonical (mapv anthropic-wire->canonical-block content-blocks)]
       {:role "assistant" :content canonical})))
 
+(defn- with-anthropic-reasoning-estimate
+  "Anthropic usage has no thinking-token count: `output_tokens` holds the thinking,
+   the text and the tool input together. When the reply has a thinking block, put
+   the output tokens minus the estimated tokens of the visible text and tool input
+   in `[:output-tokens-details :reasoning]`, with `:estimated? true`. The thinking
+   text itself cannot be counted: the summarized display shows only a summary and
+   the omitted display shows nothing."
+  [api-usage assistant-message]
+  (let [blocks
+        (:content assistant-message)
+
+        output
+        (:output-tokens api-usage)]
+
+    (if (and output (some #(= "thinking" (:type %)) blocks))
+      (let [visible (transduce
+                      (map (fn [{:keys [type text name input]}]
+                             (case type
+                               "text"
+                               (router/count-tokens "claude" (or text ""))
+
+                               "tool_use"
+                               (router/count-tokens
+                                 "claude"
+                                 (str name (if (string? input) input (json/write-json-str input))))
+
+                               0)))
+                      +
+                      0
+                      blocks)]
+        (assoc api-usage
+          :output-tokens-details {:reasoning (max 0 (- (long output) (long visible)))
+                                  :estimated? true}))
+      api-usage)))
+
 (defn- extract-anthropic-response-data
   "Extracts content, reasoning, usage, and the canonical assistant
    message from an Anthropic Messages API response envelope.
@@ -2111,7 +2146,8 @@
              :reasoning (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
              ;; Phase A canonical usage shape — :input-tokens always
              ;; TOTAL (anthropic-additive raw values are summed here).
-             :api-usage (usage/anthropic-canonical usage)
+             :api-usage (with-anthropic-reasoning-estimate (usage/anthropic-canonical usage)
+                                                           canonical-msg)
              :stream-finalization {:finish-reason (get response "stop_reason")
                                    :stop-details (get response "stop_details")}
              :http-response envelope}
@@ -7176,7 +7212,9 @@
         (cond-> {:content final-content
                  :reasoning final-reasoning
                  :provider-state ps
-                 :api-usage @usage-atom
+                 :api-usage (cond-> @usage-atom
+                              (= :anthropic (:provider ps))
+                              (with-anthropic-reasoning-estimate assistant-msg))
                  :stream-finalization stream-finalization
                  :http-response {:url url
                                  :streaming? true
