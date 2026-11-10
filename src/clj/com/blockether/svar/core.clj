@@ -156,11 +156,16 @@
    previews. A model configured by name still routes."
   router/hidden-model?)
 
+(def chat-model?
+  "True unless the model cannot answer an agent turn: the provider's models.dev catalog lists
+   no text output for it, or its name marks a media, speech or embedding model."
+  router/chat-model?)
+
 (def provider-model-visible?
   "True when model lists offer `model-name` for the provider: its model filters allow
-   it, `hidden-model?` does not hide it, and it is not outdated there. Outdated models
-   are older than their family's minimum version, dated Claude snapshots or deprecated in
-   the provider's models.dev catalog; local providers list every model they serve."
+   it, it is a `chat-model?`, `hidden-model?` does not hide it, and it is not outdated there.
+   Outdated models are older than their family's minimum version, dated Claude snapshots or
+   deprecated in the provider's models.dev catalog; local providers list every model they serve."
   router/provider-model-visible?)
 
 (def resolve-effective-model

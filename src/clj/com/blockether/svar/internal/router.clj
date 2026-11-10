@@ -2171,12 +2171,33 @@
                                                               (provider-pricing-source provider-id))
                                                             model-name))))))))
 
+(def ^:private non-chat-name-pattern
+  "A name part that marks a media, speech or embedding model, such as `gpt-image-1`, `wan3.0-video`,
+   `kling-v3.0-t2v`, `tts-1` or `text-embedding-3-large`."
+  #"(?i)(?:^|[-_./:])(?:image|video|t2v|i2v|r2v|t2i|tts|speech|transcribe|whisper|embedding|dall-e|stable-diffusion|wav2vec|canary|eleven)(?=$|[-_./:\d])")
+
+(defn chat-model?
+  "True unless `model-name` cannot answer an agent turn: the provider's catalog lists no text
+   output for it, or its name marks a media, speech or embedding model. A model without catalog
+   data counts as a chat model unless its name marks it."
+  [provider-id model-name]
+  (let [catalog
+        (lookup-by-model-variants (modelsdev/provider-models (provider-pricing-source provider-id))
+                                  model-name)
+
+        output
+        (get-in catalog [:modalities :output])]
+
+    (not (or (and (seq output) (not (contains? output :text)))
+             (re-find non-chat-name-pattern (str model-name))))))
+
 (defn provider-model-visible?
   "True when model lists offer `model-name` for `provider-id`: the provider's filters allow it
-   (`provider-excluded-model?`), and neither `hidden-model?` nor `outdated-model?` leaves it
-   out."
+   (`provider-excluded-model?`), it is a `chat-model?`, and neither `hidden-model?` nor
+   `outdated-model?` leaves it out."
   [provider-id model-name]
   (not (or (provider-excluded-model? provider-id model-name)
+           (not (chat-model? provider-id model-name))
            (hidden-model? model-name)
            (outdated-model? provider-id model-name))))
 

@@ -2916,6 +2916,24 @@
       (expect (not (router/provider-model-visible? :openai "gpt-4o")))
       (expect (router/provider-model-visible? :openai "gpt-6-sol"))))
 
+(defdescribe chat-model-test
+             ;; The Vis model pickers offered image and video models such as wan2.7-image, which cannot
+             ;; run an agent turn.
+             (it "leaves out a model whose catalog output has no text"
+                 (expect (not (router/chat-model? :alibaba-token-plan "wan2.7-image")))
+                 (expect (not (router/chat-model? :alibaba-token-plan "happyhorse-1.1-i2v")))
+                 (expect (not (router/provider-model-visible? :alibaba-token-plan "wan2.7-image"))))
+             (it "leaves out an uncataloged model that its name marks as media, speech or embedding"
+                 (doseq [model ["wan3.0-video" "qwen-image-3.0-pro" "gemini-3-pro-image"
+                                "text-embedding-3-large" "Qwen3-Embedding-8B" "whisper-1" "tts-1-hd"
+                                "kling-v3.0-t2v"]]
+                   (expect (not (router/chat-model? :alibaba-token-plan model)) model)))
+             (it "keeps chat models, also those with image input"
+                 (doseq [[pid model] [[:alibaba-token-plan "qwen3.8-flash"] [:openai "gpt-6-sol"]
+                                      [:anthropic "claude-opus-5-5"] [:ollama "qwen3-vl:8b"]
+                                      [:acme "unknown-model"]]]
+                   (expect (router/chat-model? pid model) (str pid " " model)))))
+
 ;; =============================================================================
 ;; Capability routing (`:capabilities` — the HARD filter)
 ;; =============================================================================
