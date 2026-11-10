@@ -72,6 +72,11 @@
         lim
         (:limit m)
 
+        ;; models.dev writes 0 for a limit that does not apply, as for image models.
+        limit
+        (fn [n]
+          (when (and (integer? n) (pos? (long n))) (long n)))
+
         modal
         (:modalities m)]
 
@@ -111,14 +116,14 @@
             (d (:cache_write cost)) :cache-write-5m
             (d (:cache_write cost)))))
 
-      (:context lim)
-      (assoc :context (:context lim))
+      (limit (:context lim))
+      (assoc :context (limit (:context lim)))
 
-      (:input lim)
-      (assoc :input-limit (:input lim))
+      (limit (:input lim))
+      (assoc :input-limit (limit (:input lim)))
 
-      (:output lim)
-      (assoc :output-limit (:output lim))
+      (limit (:output lim))
+      (assoc :output-limit (limit (:output lim)))
 
       (:reasoning_options m)
       (assoc :reasoning-options

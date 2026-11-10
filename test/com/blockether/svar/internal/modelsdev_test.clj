@@ -46,3 +46,16 @@
   (it "returns no models for a provider that the catalog does not list"
       (with-redefs [modelsdev/catalog (delay (catalog-of ["m-1"]))]
         (expect (= {} (modelsdev/provider-models :unknown))))))
+
+(defdescribe
+  normalize-model-limits-test
+  ;; models.dev lists `limit: {context: 0, output: 0}` for image and video models. The Vis
+  ;; model catalog sent `output_limit: 0`, and the SDK refused the whole list.
+  (it "drops a token limit that is not positive"
+      (let [model (modelsdev/normalize-model {:id "img" :limit {:context 0 :input 0 :output 0}})]
+        (expect (= {:name "img"} (select-keys model [:name :context :input-limit :output-limit])))))
+  (it "keeps positive token limits"
+      (expect (= {:context 8192 :input-limit 4096 :output-limit 1024}
+                 (select-keys (modelsdev/normalize-model
+                                {:id "m" :limit {:context 8192 :input 4096 :output 1024}})
+                              [:context :input-limit :output-limit])))))
