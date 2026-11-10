@@ -2173,8 +2173,8 @@
 
 (def ^:private non-chat-name-pattern
   "A name part that marks a media, speech or embedding model, such as `gpt-image-1`, `wan3.0-video`,
-   `kling-v3.0-t2v`, `tts-1` or `text-embedding-3-large`."
-  #"(?i)(?:^|[-_./:])(?:image|video|t2v|i2v|r2v|t2i|tts|speech|transcribe|whisper|embedding|dall-e|stable-diffusion|wav2vec|canary|eleven)(?=$|[-_./:\d])")
+   `kling-v3.0-t2v`, `tts-1`, `qwen-audio-3.0-asr-flash`, `gpt-realtime` or `text-embedding-3-large`."
+  #"(?i)(?:^|[-_./:])(?:image|video|t2v|i2v|r2v|t2i|tts|asr|audio|realtime|speech|transcribe|whisper|embedding|dall-e|stable-diffusion|wav2vec|canary|eleven)(?=$|[-_./:\d])")
 
 (defn chat-model?
   "True unless `model-name` cannot answer an agent turn: the provider's catalog lists no text

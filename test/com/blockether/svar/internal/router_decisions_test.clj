@@ -2926,7 +2926,8 @@
              (it "leaves out an uncataloged model that its name marks as media, speech or embedding"
                  (doseq [model ["wan3.0-video" "qwen-image-3.0-pro" "gemini-3-pro-image"
                                 "text-embedding-3-large" "Qwen3-Embedding-8B" "whisper-1" "tts-1-hd"
-                                "kling-v3.0-t2v"]]
+                                "kling-v3.0-t2v" "qwen-audio-3.0-asr-flash"
+                                "qwen-audio-3.0-realtime-plus" "gpt-realtime"]]
                    (expect (not (router/chat-model? :alibaba-token-plan model)) model)))
              (it "keeps chat models, also those with image input"
                  (doseq [[pid model] [[:alibaba-token-plan "qwen3.8-flash"] [:openai "gpt-6-sol"]
