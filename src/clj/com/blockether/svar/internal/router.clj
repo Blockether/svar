@@ -35,9 +35,10 @@
                :prompt-cache {:strategy :explicit-breakpoints :ttl :1h}
                :default-models
                [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"} {:name "claude-haiku-5-5"}
-                {:name "claude-fable-5-1"} {:name "claude-opus-5"} {:name "claude-fable-5"}
-                {:name "claude-sonnet-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
-                {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
+                {:name "claude-fable-5-2"} {:name "claude-fable-5-1"} {:name "claude-opus-5"}
+                {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-opus-4-8"}
+                {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}
+                {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
                            :env-keys []
                            :api-style :anthropic
@@ -46,11 +47,12 @@
                            ;; once the included quota is exhausted (see internal/modelsdev).
                            :pricing-source :anthropic
                            :default-models [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"}
-                                            {:name "claude-haiku-5-5"} {:name "claude-fable-5-1"}
-                                            {:name "claude-opus-5"} {:name "claude-fable-5"}
-                                            {:name "claude-sonnet-5"} {:name "claude-opus-4-8"}
-                                            {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
-                                            {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
+                                            {:name "claude-haiku-5-5"} {:name "claude-fable-5-2"}
+                                            {:name "claude-fable-5-1"} {:name "claude-opus-5"}
+                                            {:name "claude-fable-5"} {:name "claude-sonnet-5"}
+                                            {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
+                                            {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}
+                                            {:name "claude-haiku-4-5"}]
                            :prepend-default-models? true}
    :zai {:base-url "https://api.z.ai/api/anthropic/v1"
          :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
@@ -311,6 +313,11 @@
                   :reasoning? true
                   :reasoning-style :openai-effort}
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
+   "claude-fable-5-2" {:intelligence :frontier
+                       :speed :slow
+                       :capabilities #{:chat :vision}
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
    "claude-fable-5-1" {:intelligence :frontier
                        :speed :slow
                        :capabilities #{:chat :vision}
@@ -553,18 +560,18 @@
              "claude-opus-5-5" "gpt-6.1-sol" "kimi-k3" "grok-4.7" "qwen3.8-max" "glm-5.3"
              "deepseek-v4-pro" "minimax-m3" "longcat-2.0" "mimo-v2.6-pro"
              ;; Premium
-             "claude-fable-5-1" "gpt-6-astra"
+             "claude-fable-5-2" "gpt-6-astra"
              ;; Mid-size
              "claude-sonnet-5-5" "kimi-k2.7-code"
              ;; Fast
              "claude-haiku-5-5" "gpt-6-luna" "glm-5.3-flash" "glm-5.3-flashx" "deepseek-v4.1-flash"
              "qwen3.8-flash" "mimo-v2.6-flash" "hy3" "muse-spark-1.3-contributor"]
-   :previous ["claude-opus-5" "claude-fable-5" "claude-sonnet-5" "claude-opus-4-8" "claude-opus-4-7"
-              "claude-opus-4-6" "claude-sonnet-4-6" "claude-haiku-4-5" "gpt-6-sol" "gpt-5.6-sol"
-              "gpt-5.6-terra" "gpt-5.5" "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex" "grok-4.6"
-              "kimi-k2.6" "qwen3.7-max" "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1"
-              "glm-5-turbo" "glm-5v-turbo" "deepseek-v4-flash" "minimax-m2.7"
-              "muse-spark-1.2-contributor"]})
+   :previous ["claude-opus-5" "claude-fable-5-1" "claude-fable-5" "claude-sonnet-5"
+              "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6" "claude-sonnet-4-6"
+              "claude-haiku-4-5" "gpt-6-sol" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.5" "gpt-5.4"
+              "gpt-5.6-luna" "gpt-5.3-codex" "grok-4.6" "kimi-k2.6" "qwen3.7-max" "qwen3.7-plus"
+              "qwen3.6-plus" "glm-5.2" "glm-5.1" "glm-5-turbo" "glm-5v-turbo" "deepseek-v4-flash"
+              "minimax-m2.7" "muse-spark-1.2-contributor"]})
 
 (def SPECIAL_MODEL_NAMES
   "Model ids `sort-models` puts last although their names look ordinary: `deepseek-flash`
@@ -901,8 +908,8 @@
 (def ^:private ANTHROPIC_ADAPTIVE_THINKING
   "The thinking config every Claude adaptive-thinking request carries.
 
-   `display` is NOT optional for us: it defaults to \"omitted\" on Fable 5.1 /
-   Fable 5 / Mythos 5 / Opus 5.5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, so svar
+   `display` is NOT optional for us: it defaults to \"omitted\" on Fable 5.2 /
+   Fable 5.1 / Fable 5 / Mythos 5 / Opus 5.5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, so svar
    always names it. svar asks for the summary; the `:thinking-display` ask opt
    selects \"omitted\" instead (see `apply-thinking-display`)."
   {:type "adaptive" :display "summarized"})
@@ -910,13 +917,13 @@
 (def ^:private ANTHROPIC_ADAPTIVE_NAME_PATTERN
   "Claude families that take ADAPTIVE thinking, by name.
 
-   Fable 5.1 / Fable 5 / Mythos 5 / Sonnet 5.5 / Sonnet 5 / Opus 5.5 / Opus 5 / Haiku 5.5 /
+   Fable 5.2 / Fable 5.1 / Fable 5 / Mythos 5 / Sonnet 5.5 / Sonnet 5 / Opus 5.5 / Opus 5 / Haiku 5.5 /
    Opus 4.8–4.7 reject
    manual budget_tokens; Opus 4.6 and Sonnet 4.6 still accept it but Anthropic marks it
    deprecated. Dot and dash aliases both match so Copilot-style ids
    (`claude-opus-4.8`) do not regress. This is the FALLBACK — `models.dev`
    decides first, see `anthropic-adaptive-thinking-model?`."
-  #"(?i)^claude-(?:fable-5(?:[-.]1)?|mythos-5|sonnet-5(?:[-.]5)?|opus-5(?:[-.]5)?|haiku-5[-.]5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
+  #"(?i)^claude-(?:fable-5(?:[-.][12])?|mythos-5|sonnet-5(?:[-.]5)?|opus-5(?:[-.]5)?|haiku-5[-.]5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
 
 (defn- anthropic-adaptive-thinking-model?
   "Does this Claude model take ADAPTIVE thinking (`output_config.effort`) rather
@@ -974,7 +981,7 @@
 
              ;; `output_config.effort` is the Opus 4.5+ control; the
              ;; adaptive `thinking` block only belongs to families that actually
-             ;; take it (Opus 4.6+ / Sonnet 5 / Fable 5.1 / Fable 5).
+             ;; take it (Opus 4.6+ / Sonnet 5 / Fable 5.2 / Fable 5.1 / Fable 5).
              :anthropic-thinking
              (cond-> {:output_config {:effort effective}}
                (anthropic-adaptive-thinking-model? model-map)
@@ -1332,7 +1339,8 @@
    ;; sonnets' 1M beta vs the 200K we enforce). FULL pricing stays only for models
    ;; the catalog lacks (mythos-5, sonnet-4, sonnet-4-20250514) or where the
    ;; catalog drifts from our metered retail rate (sonnet-5 → catalog 2/10 vs 3/15).
-   {"claude-fable-5-1" {:pricing {:cache-write-1h 20.00} :context 1000000}
+   {"claude-fable-5-2" {:pricing {:cache-write-1h 16.00} :context 1000000}
+    "claude-fable-5-1" {:pricing {:cache-write-1h 20.00} :context 1000000}
     "claude-fable-5" {:pricing {:cache-write-1h 20.00} :context 1000000}
     "claude-mythos-5"
     {:pricing

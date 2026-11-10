@@ -1585,14 +1585,29 @@
         (expect (= "claude-opus-5-5" (:root provider)))
         ;; `:anthropic-coding-plan` prepends its FULL default catalog,
         ;; deduped against the caller's configured models.
-        (expect (= ["claude-opus-5-5" "claude-sonnet-5-5" "claude-haiku-5-5" "claude-fable-5-1"
-                    "claude-opus-5" "claude-fable-5" "claude-sonnet-5" "claude-opus-4-8"
-                    "claude-opus-4-7" "claude-opus-4-6" "claude-sonnet-4-6" "claude-haiku-4-5"]
+        (expect (= ["claude-opus-5-5" "claude-sonnet-5-5" "claude-haiku-5-5" "claude-fable-5-2"
+                    "claude-fable-5-1" "claude-opus-5" "claude-fable-5" "claude-sonnet-5"
+                    "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6" "claude-sonnet-4-6"
+                    "claude-haiku-4-5"]
                    (mapv :name (:models provider))))
         (expect (= :anthropic (:api-style provider)))
         (expect
           (= {:input 4.0 :cached-input 0.2 :cache-write-5m 5.0 :cache-write-1h 8.0 :output 20.0}
              (select-keys (get-in provider [:models 0 :pricing])
+                          [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
+  (it "surfaces Claude Fable 5.2 context, thinking and pricing"
+      (let [entry
+            (router/provider-model-entry :anthropic-coding-plan "claude-fable-5-2")
+
+            model
+            (router/provider-model-metadata :anthropic-coding-plan {:name "claude-fable-5-2"})]
+
+        (expect (= 1000000 (:context entry)))
+        (expect (= :frontier (:intelligence model)))
+        (expect (= :anthropic-thinking (:reasoning-style model)))
+        (expect
+          (= {:input 8.0 :cached-input 0.2 :cache-write-5m 10.0 :cache-write-1h 16.0 :output 40.0}
+             (select-keys (:pricing entry)
                           [:input :cached-input :cache-write-5m :cache-write-1h :output]))))))
 ;; =============================================================================
 ;; Tier 3 — `:reasoning` integrates with routing (selection filter)
