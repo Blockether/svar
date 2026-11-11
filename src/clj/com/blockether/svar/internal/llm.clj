@@ -386,7 +386,9 @@
   (boolean (and provider-id (str/starts-with? (name provider-id) "github-copilot"))))
 
 (defn- make-llm-headers
-  "Builds HTTP headers for the given API style."
+  "Builds HTTP headers for the given API style.
+   A nil API key adds no key header: the JDK refuses a nil header value with the
+   bare message `value`, while the provider answers with its own words."
   ([api-style api-key] (make-llm-headers api-style api-key nil))
   ([api-style api-key provider-id]
    (case api-style
@@ -395,12 +397,15 @@
                                                "anthropic-version" "2023-06-01"
                                                "Content-Type" "application/json"}
            (anthropic-oauth-token? api-key) (anthropic-oauth-headers api-key)
-           :else
-           {"x-api-key" api-key "anthropic-version" "2023-06-01" "Content-Type" "application/json"})
+           :else (cond-> {"anthropic-version" "2023-06-01" "Content-Type" "application/json"}
+                   (some? api-key)
+                   (assoc "x-api-key" api-key)))
 
      ;; Gemini authenticates with the API key in a dedicated header.
      :gemini
-     {"x-goog-api-key" api-key "Content-Type" "application/json"}
+     (cond-> {"Content-Type" "application/json"}
+       (some? api-key)
+       (assoc "x-goog-api-key" api-key))
 
      ;; :openai-compatible-chat and everything else - Bearer token
      {"Authorization" (str "Bearer " api-key) "Content-Type" "application/json"})))
