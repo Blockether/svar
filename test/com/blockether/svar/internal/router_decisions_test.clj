@@ -2744,7 +2744,7 @@
              ;; lookup tolerant so BOTH forms resolve to the native /v1/messages wire.
              (it "routes Claude-on-Copilot to the anthropic wire for dashed AND dotted ids"
                  (doseq [model-name ["claude-opus-4-8" "claude-opus-4.8" "claude-sonnet-4-6"
-                                     "claude-sonnet-4.6"]]
+                                     "claude-sonnet-4.6" "claude-fable-5.2"]]
                    (let [p (router/normalize-provider
                              0
                              {:id :github-copilot :api-key "x" :models [{:name model-name}]})

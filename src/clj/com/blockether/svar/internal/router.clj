@@ -120,10 +120,10 @@
     :models-base :host
     :models-shape :github-copilot
     :default-models [{:name "claude-opus-5.5"} {:name "claude-sonnet-5.5"}
-                     {:name "claude-haiku-5.5"} {:name "claude-opus-5"} {:name "claude-fable-5"}
-                     {:name "claude-sonnet-5"} {:name "gpt-6.1-sol"} {:name "gpt-6-astra"}
-                     {:name "gpt-6-luna"} {:name "gpt-6-sol"} {:name "gpt-5.6-sol"}
-                     {:name "gpt-5.6-terra"} {:name "gpt-5.6-luna"}]
+                     {:name "claude-haiku-5.5"} {:name "claude-fable-5.2"} {:name "claude-opus-5"}
+                     {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "gpt-6.1-sol"}
+                     {:name "gpt-6-astra"} {:name "gpt-6-luna"} {:name "gpt-6-sol"}
+                     {:name "gpt-5.6-sol"} {:name "gpt-5.6-terra"} {:name "gpt-5.6-luna"}]
     :llm-headers {"Editor-Version" "vscode/1.100.0"
                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                   "Copilot-Integration-Id" "vscode-chat"
@@ -1522,6 +1522,10 @@
                        :api-style :anthropic
                        :reasoning? true
                        :reasoning-style :anthropic-thinking}
+    "claude-fable-5.2" {:pricing {:input 0.0 :output 0.0}
+                        :api-style :anthropic
+                        :reasoning? true
+                        :reasoning-style :anthropic-thinking}
     "claude-fable-5" {:pricing {:input 0.0 :output 0.0}
                       :api-style :anthropic
                       :reasoning? true
