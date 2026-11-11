@@ -9603,9 +9603,10 @@
             (recur next-attempt (conj burned (:api-usage (ex-data error))))))))))
 
 (def ^:private ^:const OUTPUT_BUDGET_RESEND_LIMIT
-  "Larger-budget re-sends after the model exhausts its output budget before any
-   answer text or tool call. One doubled budget covers reasoning-heavy calls; a
-   second would pay again for the same reasoning, so the caller changes strategy."
+  "Larger-budget re-sends after the model exhausts its output budget. With a known
+   output ceiling the one re-send asks for the whole ceiling; without one it doubles
+   the budget. A second re-send would pay again for the same output, so the caller
+   changes strategy and can use `:next-output-budget` from the failure."
   1)
 
 (defn- output-budget-failure
@@ -9639,13 +9640,17 @@
              (apply min))))
 
 (defn- output-budget-resend-budget
-  "The doubled output budget for re-sending the request that failed with `data`,
-   bounded by `limit`. A request without an output budget got the gateway or
-   provider default, so the billed output tokens are the exhausted budget
-   (Blockether/svar#2). Nil when a re-send cannot help: neither budget is known,
-   answer text or a tool call already streamed, or `limit` leaves no room above
-   the exhausted budget."
-  [data limit]
+  "The output budget for re-sending the request that failed with `data`, bounded by
+   `limit`. With a known output `ceiling`, ask for the whole `limit` at once, so a
+   gateway default far below the model's limit needs one re-send (Blockether/vis#464).
+   Without a ceiling, double the exhausted budget. A request without an output budget
+   got the gateway or provider default, so the billed output tokens are the exhausted
+   budget (Blockether/svar#2). Streamed answer text does not stop a re-send: the
+   provider-retry event tells a streaming caller to discard it, and no partial tool
+   call runs. Nil when a re-send cannot help: neither budget is known, the billed
+   output stayed below the sent budget, or `limit` leaves no room above the
+   exhausted budget."
+  [data limit ceiling]
   (let [sent
         (:max-output-tokens data)
 
@@ -9656,7 +9661,6 @@
         (max (long (if (pos-int? sent) sent 0)) (long (if (pos-int? used) used 0)))]
 
     (when (and (pos? spent)
-               (not (failure/answer-output-started? data))
                ;; Billed output below the sent budget: a lower cap outside the
                ;; request stopped the reply, so a larger budget cannot help.
                (not (and (pos-int? sent) (pos-int? used) (< (long used) (long sent)))))
@@ -9664,18 +9668,45 @@
             (* 2 spent)
 
             budget
-            (if limit (min doubled (long limit)) doubled)]
+            (cond (and ceiling limit) (long limit)
+                  limit (min doubled (long limit))
+                  :else doubled)]
 
-        (when (> budget spent) budget)))))
+        (when (> (long budget) spent) budget)))))
+
+(defn- output-budget-evidence
+  "Names the output tokens the reply used and the budget the request sent, so a
+   reader can tell a gateway cap from the model's limit. Nil when the provider
+   billed no output tokens."
+  [data]
+  (let [used
+        (get-in data [:api-usage :output-tokens])
+
+        sent
+        (:max-output-tokens data)]
+
+    (when (pos-int? used)
+      (str " The reply stopped at "
+           used
+           " output tokens; the request sent "
+           (if (pos-int? sent)
+             (str "an output budget of " sent)
+             "no output budget, so a provider or gateway default applied")
+           "."))))
 
 (defn- annotate-output-budget-ex
   "Rebuilds the typed output-budget failure `cause` at the call boundary with the
-   re-send count, the output ceiling and the discarded attempts' summed usage."
-  [^Throwable e ^Throwable cause resends burned-usage output-ceiling]
-  (ex-info (ex-message cause)
+   re-send count, the output ceiling, the larger budget a next request can use and
+   the discarded attempts' summed usage. The message names the output tokens used
+   and the budget sent."
+  [^Throwable e ^Throwable cause resends burned-usage output-ceiling next-budget]
+  (ex-info (str (ex-message cause) (output-budget-evidence (ex-data cause)))
            (cond-> (assoc (ex-data cause) :output-budget-resends resends)
              output-ceiling
              (assoc :output-ceiling output-ceiling)
+
+             next-budget
+             (assoc :next-output-budget next-budget)
 
              burned-usage
              (assoc :output-budget-resend-usage burned-usage))
@@ -9683,7 +9714,7 @@
 
 (defn- announce-output-budget-resend!
   "Logs one larger-budget re-send and announces it on the caller's raw `on-chunk`
-   as a provider retry, so a streaming caller discards the reasoning it painted."
+   as a provider retry, so a streaming caller discards the reasoning and text it painted."
   [{:keys [model provider-id on-chunk]} attempt budget ^Throwable cause]
   (trove/log! {:level :warn
                :id ::output-budget-resend
@@ -9694,7 +9725,7 @@
                                 :max-output-tokens budget
                                 :output-tokens (get-in (ex-data cause)
                                                        [:api-usage :output-tokens])})
-               :msg "output budget exhausted before any answer -> re-sending with a larger budget"})
+               :msg "output budget exhausted -> re-sending with a larger budget"})
   (when on-chunk
     (try (on-chunk (cond-> {:event/type :llm.routing/provider-retry
                             :reason :output-budget-exhausted
@@ -9720,10 +9751,10 @@
 
 (defn- call-with-output-budget-resend
   "Runs `send!` (fn of an output-budget override, nil on the first attempt) and,
-   when it throws `:svar.llm/max-tokens-exceeded` before any answer text or tool
-   call, re-sends the SAME request to the SAME model with a doubled output budget -
-   at most `OUTPUT_BUDGET_RESEND_LIMIT` times, bounded by the model's
-   `:output-ceiling` and the remaining `:context` window. An unchanged replay would
+   when it throws `:svar.llm/max-tokens-exceeded`, re-sends the SAME request to the
+   SAME model with a larger output budget (see `output-budget-resend-budget`) - at
+   most `OUTPUT_BUDGET_RESEND_LIMIT` times, bounded by the model's `:output-ceiling`
+   and the remaining `:context` window. An unchanged replay would
    stop at the same cap, so every re-send raises it. A route that strips the
    budget control (`:output-budget-stripped?`, Codex) never re-sends. Honors
    `*cancel-fn*`.
@@ -9731,7 +9762,9 @@
    A HEALED call returns `send!`'s value with `:output-budget-resends` and
    `:output-budget-resend-usage` (the discarded attempts' summed api-usage). A
    failure throws the typed exception with `:output-budget-resends`,
-   `:output-ceiling` and `:output-budget-resend-usage` merged into ex-data."
+   `:output-ceiling`, `:next-output-budget` (a larger budget that a next request
+   can still use, when one exists) and `:output-budget-resend-usage` merged into
+   ex-data."
   [{:keys [output-ceiling context output-budget-stripped?] :as opts} send!]
   (let [cancel-fn *cancel-fn*]
     (loop [attempt 0
@@ -9747,19 +9780,22 @@
 
         (if-let [cause (:cause outcome)]
           (let [data (ex-data cause)
-                next-budget (when (and (not output-budget-stripped?)
-                                       (< attempt OUTPUT_BUDGET_RESEND_LIMIT)
+                larger (when-not output-budget-stripped?
+                         (output-budget-resend-budget
+                           data
+                           (output-budget-limit output-ceiling context data)
+                           output-ceiling))
+                next-budget (when (and (< attempt OUTPUT_BUDGET_RESEND_LIMIT)
                                        (not (caller-cancel-requested? cancel-fn)))
-                              (output-budget-resend-budget
-                                data
-                                (output-budget-limit output-ceiling context data)))]
+                              larger)]
 
             (when-not next-budget
               (throw (annotate-output-budget-ex (:error outcome)
                                                 cause
                                                 attempt
                                                 burned-usage
-                                                output-ceiling)))
+                                                output-ceiling
+                                                larger)))
             (announce-output-budget-resend! opts (inc attempt) next-budget cause)
             (recur (inc attempt) next-budget (conj burned (:api-usage data))))
           (cond-> (:value outcome)
@@ -10237,15 +10273,16 @@
 
    OUTPUT BUDGET: every wire reports an exhausted output budget as
    `:svar.llm/max-tokens-exceeded` (Chat `length`, Anthropic `max_tokens`,
-   Responses `max_output_tokens`). When that happens before any answer text or
-   tool call and the request carried an output budget, the SAME request is re-sent
-   once with double the budget, bounded by the model's output ceiling and the
-   remaining context window. `:on-chunk` first receives `{:event/type
-   :llm.routing/provider-retry :reason :output-budget-exhausted :max-output-tokens N}`,
-   so discard the reasoning already streamed. A HEALED call carries
-   `:output-budget-resends` and `:output-budget-resend-usage`, and its `:cost`
-   includes the discarded attempt. The terminal ex-data carries `:max-output-tokens`
+   Responses `max_output_tokens`). When that happens, the SAME request is re-sent
+   once with a larger budget: the model's output ceiling when known, else double
+   the exhausted budget, bounded by the remaining context window. `:on-chunk` first
+   receives `{:event/type :llm.routing/provider-retry :reason :output-budget-exhausted
+   :max-output-tokens N}`, so discard the reasoning and text already streamed. A
+   HEALED call carries `:output-budget-resends` and `:output-budget-resend-usage`,
+   and its `:cost` includes the discarded attempt. The terminal message names the
+   output tokens used and the budget sent. Its ex-data carries `:max-output-tokens`
    (nil when the endpoint ignores the control), `:output-ceiling` when known,
+   `:next-output-budget` when a next request can still ask for more,
    `:output-budget-resends` and `:api-usage`.
 
    SELF-HEALING TOOL SCHEMAS: `strict` is always removed before the first

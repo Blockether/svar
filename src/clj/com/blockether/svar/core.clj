@@ -395,10 +395,13 @@
    headers) carries `{:resets-at-ms <epoch-ms> :remaining :limit :windows}`.
 
    Every wire reports an exhausted output budget as :svar.llm/max-tokens-exceeded.
-   When only reasoning streamed, the request is re-sent once with double the budget,
-   bounded by the model's output ceiling and context window. :on-chunk first gets
-   {:event/type :llm.routing/provider-retry :reason :output-budget-exhausted}. A
-   healed result carries :output-budget-resends and :output-budget-resend-usage.
+   The request is re-sent once with a larger budget: the model's output ceiling when
+   known, else double the budget, bounded by the context window. :on-chunk first gets
+   {:event/type :llm.routing/provider-retry :reason :output-budget-exhausted}, so
+   discard the reasoning and text already streamed. A healed result carries
+   :output-budget-resends and :output-budget-resend-usage. A failure names the output
+   tokens used and the budget sent, and carries :next-output-budget when a next
+   request can still ask for more.
 
    A stream that breaks before any answer text or tool call reaches you (no
    response, a silent or stalled stream, an early end or a dropped connection) is

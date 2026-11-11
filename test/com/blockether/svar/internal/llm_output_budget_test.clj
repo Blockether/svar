@@ -1,8 +1,8 @@
 (ns com.blockether.svar.internal.llm-output-budget-test
   "Output-budget recovery (Blockether/vis#296): every wire reports an exhausted
-   output budget as `:svar.llm/max-tokens-exceeded`, and `ask-code!` re-sends a
-   reasoning-only failure once with a doubled budget, bounded by the model's
-   output ceiling and context window.
+   output budget as `:svar.llm/max-tokens-exceeded`, and `ask-code!` re-sends the
+   failure once with a larger budget: the whole output ceiling when known
+   (Blockether/vis#464), else a doubled budget, bounded by the context window.
 
    Covers:
      - re-send budget and limit arithmetic
@@ -14,6 +14,7 @@
        no re-send on Codex, which strips the control"
   (:require [babashka.http-client :as http]
             [charred.api :as json]
+            [clojure.string :as str]
             [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.core :as svar]
             [com.blockether.svar.internal.llm :as sut]
@@ -43,29 +44,40 @@
   output-budget-arithmetic-test
   (describe
     "re-send budget"
-    (it "doubles the exhausted budget when only reasoning streamed"
-        (expect (= 2000
-                   (resend-budget {:max-output-tokens 1000 :api-usage {:output-tokens 1000}} nil))))
+    (it "doubles the exhausted budget when the output ceiling is unknown"
+        (expect
+          (= 2000
+             (resend-budget {:max-output-tokens 1000 :api-usage {:output-tokens 1000}} nil nil))))
     (it "doubles the billed output when it exceeds the sent budget"
-        (expect (= 3000
-                   (resend-budget {:max-output-tokens 1000 :api-usage {:output-tokens 1500}} nil))))
-    (it "stops at the limit" (expect (= 1500 (resend-budget {:max-output-tokens 1000} 1500))))
+        (expect
+          (= 3000
+             (resend-budget {:max-output-tokens 1000 :api-usage {:output-tokens 1500}} nil nil))))
+    (it "stops at the limit" (expect (= 1500 (resend-budget {:max-output-tokens 1000} 1500 nil))))
+    ;; Blockether/vis#464: a 2048 default and a 128000 ceiling took one 4096 re-send.
+    (it "asks for the whole limit when the output ceiling is known"
+        (expect (= 128000
+                   (resend-budget {:max-output-tokens nil :api-usage {:output-tokens 2048}}
+                                  128000
+                                  128000))))
     (it "gives up when the limit leaves no room above the exhausted budget"
-        (expect (nil? (resend-budget {:max-output-tokens 1000} 1000))))
+        (expect (nil? (resend-budget {:max-output-tokens 1000} 1000 1000))))
     (it "gives up when neither the sent nor the billed budget is known"
-        (expect (nil? (resend-budget {:max-output-tokens nil} nil))))
+        (expect (nil? (resend-budget {:max-output-tokens nil} nil nil))))
     ;; Blockether/svar#2: a gateway or provider default capped a request without a budget.
     (it "starts from the billed output when the request carried no budget"
-        (expect (= 4096
-                   (resend-budget {:max-output-tokens nil :api-usage {:output-tokens 2048}} nil))))
+        (expect
+          (= 4096
+             (resend-budget {:max-output-tokens nil :api-usage {:output-tokens 2048}} nil nil))))
     ;; Blockether/svar#2: a gateway cap below the sent budget ignores a larger budget.
     (it "gives up when the billed output stays below the sent budget"
         (expect (nil? (resend-budget {:max-output-tokens 25000 :api-usage {:output-tokens 2048}}
+                                     nil
                                      nil))))
-    (it "gives up after answer text or a tool call"
-        (expect (nil? (resend-budget {:max-output-tokens 1000 :partial-content "Part"} nil)))
-        (expect (nil? (resend-budget {:max-output-tokens 1000 :content-acc-len 4} nil)))
-        (expect (nil? (resend-budget {:max-output-tokens 1000 :tool-call-count 1} nil)))))
+    ;; Blockether/vis#464: one prose sentence before a code block blocked every re-send.
+    (it "re-sends after answer text or a tool call"
+        (expect (= 2000 (resend-budget {:max-output-tokens 1000 :partial-content "Part"} nil nil)))
+        (expect (= 2000 (resend-budget {:max-output-tokens 1000 :content-acc-len 4} nil nil)))
+        (expect (= 2000 (resend-budget {:max-output-tokens 1000 :tool-call-count 1} nil nil)))))
   (describe "re-send limit"
             (it "takes the smaller of the output ceiling and the context room"
                 (expect (= 4000 (budget-limit 4000 100000 {:api-usage {:input-tokens 1000}})))
@@ -127,7 +139,7 @@
 
 (defdescribe
   chat-output-budget-resend-test
-  (it "re-sends once with a doubled budget and bills the discarded attempt"
+  (it "re-sends once with the output ceiling and bills the discarded attempt"
       (let [bodies
             (atom [])
 
@@ -144,7 +156,7 @@
                                        {:messages [(svar/user "Say done.")]
                                         :on-chunk #(swap! events conj %)})]
             (expect (= "done" (:content result)))
-            (expect (= [1000 2000] (mapv :max_tokens @bodies)))
+            (expect (= [1000 4000] (mapv :max_tokens @bodies)))
             (expect (= 1 (:output-budget-resends result)))
             (expect (= {:input-tokens 1000 :output-tokens 1000 :total-tokens 2000}
                        (:output-budget-resend-usage result)))
@@ -153,22 +165,23 @@
             (expect (= [{:reason :output-budget-exhausted
                          :attempt 1
                          :max-retries 1
-                         :max-output-tokens 2000}]
+                         :max-output-tokens 4000}]
                        (retry-events @events)))))))
   (it "stops after one re-send with the typed failure and its evidence"
       (let [bodies (atom [])]
         (with-redefs [router/provider-model-pricing fixed-pricing
-                      sut/chat-completion (mock-chat [(capped-reply 1000) (capped-reply 2000)]
+                      sut/chat-completion (mock-chat [(capped-reply 1000) (capped-reply 4000)]
                                                      bodies)]
 
           (let [data (thrown-data #(svar/ask-code! (chat-router budget-model)
                                                    {:messages [(svar/user "Say done.")]}))]
-            (expect (= [1000 2000] (mapv :max_tokens @bodies)))
+            (expect (= [1000 4000] (mapv :max_tokens @bodies)))
             (expect (= :svar.llm/max-tokens-exceeded (:type data)))
             (expect (= 1 (:output-budget-resends data)))
-            (expect (= 2000 (:max-output-tokens data)))
+            (expect (= 4000 (:max-output-tokens data)))
             (expect (= 4000 (:output-ceiling data)))
-            (expect (= 2000 (get-in data [:api-usage :output-tokens])))
+            (expect (nil? (:next-output-budget data)))
+            (expect (= 4000 (get-in data [:api-usage :output-tokens])))
             (expect (= {:input-tokens 1000 :output-tokens 1000 :total-tokens 2000}
                        (:output-budget-resend-usage data)))))))
   (it "does not re-send a budget that already equals the output ceiling"
@@ -194,7 +207,7 @@
           (let [result (svar/ask-code! (chat-router {:output-limit 2048 :output-ceiling 8192})
                                        {:messages [(svar/user "Say done.")]})]
             (expect (= "done" (:content result)))
-            (expect (= [2048 4096] (mapv :max_tokens @bodies)))
+            (expect (= [2048 8192] (mapv :max_tokens @bodies)))
             (expect (= 1 (:output-budget-resends result)))
             (expect (not (contains? result :empty-reply-resends)))))))
   (it "fails at once when a gateway cap below the sent budget stops the reply"
@@ -308,6 +321,73 @@
                          :max-retries 1
                          :max-output-tokens 65536}]
                        (retry-events @events)))))))
+  ;; Blockether/vis#464: one prose sentence before a code block blocked the re-send.
+  (it "re-sends after streamed answer text"
+      (let [bodies
+            (atom [])
+
+            events
+            (atom [])
+
+            text-then-cap
+            (into [{"type" "response.output_text.delta" "delta" "Here is the plan."}]
+                  responses-capped)]
+
+        (with-redefs [router/provider-model-pricing
+                      fixed-pricing
+
+                      http/post
+                      (stub-responses [text-then-cap responses-answer] bodies)]
+
+          (let [result (svar/ask-code! (responses-router {})
+                                       {:messages [(svar/user "Reply briefly")]
+                                        :on-chunk #(swap! events conj %)})]
+            (expect (= "Done." (:content result)))
+            (expect (= [32768 65536] (mapv #(get % "max_output_tokens") @bodies)))
+            (expect (= 1 (count (retry-events @events))))))))
+  (it
+    "names the used and sent budgets and a larger next budget when the ceiling is unknown"
+    (let [bodies
+          (atom [])
+
+          cap-at-budget
+          (fn [_ opts]
+            (let [body (json/read-json (:body opts))]
+              (swap! bodies conj body)
+              {:status 200
+               :body (sse-body [{"type" "response.incomplete"
+                                 "response" {"incomplete_details" {"reason" "max_output_tokens"}
+                                             "usage" {"input_tokens" 1000
+                                                      "output_tokens"
+                                                      (get body "max_output_tokens")}}}])}))]
+
+      (with-redefs [router/provider-model-pricing
+                    fixed-pricing
+
+                    http/post
+                    cap-at-budget]
+
+        (let [call
+              #(svar/ask-code! (responses-router {:models [{:name "gpt-6-sol" :context 272000}]})
+                               {:messages [(svar/user "Reply briefly")]
+                                :on-chunk (fn [_])})
+
+              data
+              (thrown-data call)
+
+              [first-budget second-budget]
+              (mapv #(get % "max_output_tokens") @bodies)]
+
+          (expect (= 2 (count @bodies)))
+          (expect (= (* 2 first-budget) second-budget))
+          (expect (= second-budget (:max-output-tokens data)))
+          (expect (< second-budget (:next-output-budget data)))
+          (expect (str/includes? (thrown-message call)
+                                 (str "The reply stopped at "
+                                      second-budget
+                                      " output tokens; the request sent an output budget of "
+                                      second-budget
+                                      ".")))))))
   (it "does not re-send on Codex, which strips the budget control"
       (let [bodies (atom [])]
         (with-redefs [router/provider-model-pricing fixed-pricing
