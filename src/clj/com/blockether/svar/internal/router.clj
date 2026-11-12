@@ -23,8 +23,7 @@
 (def KNOWN_PROVIDERS
   {:openai {:base-url "https://api.openai.com/v1"
             :env-keys ["OPENAI_API_KEY"]
-            :default-models [{:name "gpt-6.1-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
-                             {:name "gpt-6-sol"}]}
+            :default-models [{:name "gpt-6.1-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}]}
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
@@ -33,12 +32,8 @@
                ;; costs more (2x base, not 1.25x), and a read stays at 0.1x. Plan tiers with
                ;; `:provider-model-source :anthropic` inherit this policy.
                :prompt-cache {:strategy :explicit-breakpoints :ttl :1h}
-               :default-models
-               [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"} {:name "claude-haiku-5-5"}
-                {:name "claude-fable-5-2"} {:name "claude-fable-5-1"} {:name "claude-opus-5"}
-                {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-opus-4-8"}
-                {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}
-                {:name "claude-haiku-4-5"}]}
+               :default-models [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"}
+                                {:name "claude-haiku-5-5"} {:name "claude-fable-5-2"}]}
    :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
                            :env-keys []
                            :api-style :anthropic
@@ -47,12 +42,7 @@
                            ;; once the included quota is exhausted (see internal/modelsdev).
                            :pricing-source :anthropic
                            :default-models [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"}
-                                            {:name "claude-haiku-5-5"} {:name "claude-fable-5-2"}
-                                            {:name "claude-fable-5-1"} {:name "claude-opus-5"}
-                                            {:name "claude-fable-5"} {:name "claude-sonnet-5"}
-                                            {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
-                                            {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}
-                                            {:name "claude-haiku-4-5"}]
+                                            {:name "claude-haiku-5-5"} {:name "claude-fable-5-2"}]
                            :prepend-default-models? true}
    :zai {:base-url "https://api.z.ai/api/anthropic/v1"
          :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
@@ -62,7 +52,7 @@
          ;; order so the quicker lane is an explicit pick, never the automatic default.
          :lead-models ["glm-5.3-flash"]
          :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"} {:name "glm-5.3-flashx"}
-                          {:name "glm-5.1"} {:name "glm-5-turbo"} {:name "glm-5v-turbo"}]}
+                          {:name "glm-5-turbo"} {:name "glm-5v-turbo"}]}
    :zai-coding {:base-url "https://api.z.ai/api/anthropic/v1"
                 :api-style :anthropic
                 ;; Coding Plan endpoint, but for budget accounting we use
@@ -91,8 +81,8 @@
                      ;; entitlement rather than a catalog fact — but never ahead of Flash.
                      :lead-models ["glm-5.3-flash"]
                      :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"}
-                                      {:name "glm-5.3-flashx"} {:name "glm-5.1"}
-                                      {:name "glm-5-turbo"} {:name "glm-5v-turbo"}]}
+                                      {:name "glm-5.3-flashx"} {:name "glm-5-turbo"}
+                                      {:name "glm-5v-turbo"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
    ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
    ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
@@ -120,10 +110,8 @@
     :models-base :host
     :models-shape :github-copilot
     :default-models [{:name "claude-opus-5.5"} {:name "claude-sonnet-5.5"}
-                     {:name "claude-haiku-5.5"} {:name "claude-fable-5.2"} {:name "claude-opus-5"}
-                     {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "gpt-6.1-sol"}
-                     {:name "gpt-6-astra"} {:name "gpt-6-luna"} {:name "gpt-6-sol"}
-                     {:name "gpt-5.6-sol"} {:name "gpt-5.6-terra"} {:name "gpt-5.6-luna"}]
+                     {:name "claude-haiku-5.5"} {:name "claude-fable-5.2"} {:name "gpt-6.1-sol"}
+                     {:name "gpt-6-astra"} {:name "gpt-6-luna"} {:name "gpt-5.6-terra"}]
     :llm-headers {"Editor-Version" "vscode/1.100.0"
                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                   "Copilot-Integration-Id" "vscode-chat"
@@ -150,7 +138,6 @@
                   ;; cached input, cache writes and output.
                   :fast-mode {:service-tier "priority" :cost-multiplier 2.0}
                   :default-models [{:name "gpt-6.1-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
-                                   {:name "gpt-6-sol"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"}
                                    {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
@@ -2111,15 +2098,50 @@
 
     (or (contains? excluded model-name) (and version min-version (version< version min-version)))))
 
+(def ^:private preview-pattern #"[-:]preview(?=[-:]|$)")
+
+(defn- model-line
+  "`[line version]` of a model id, or nil when the id has no version after its name:
+   `glm-5.2` gives `[[\"glm-\" \"\"] [5 2]]`. Models of one line differ only in their version,
+   so `glm-5.2` and `glm-5.3` share a line and `glm-5-turbo` has its own. A `-preview` part
+   and a date at the end are not part of the line: `qwen4-max-preview` is on the line of
+   `qwen3.8-max`, and `deepseek-v4-flash-0731` on the line of `deepseek-v4.1-flash`."
+  [model-name]
+  (when-let [[_ prefix major minor tail] (re-matches #"([a-z][a-z-]*)(\d+)(?:-(\d{1,2}))?((?:-.*)?)"
+                                                     (modelsdev/model-key model-name))]
+    [[prefix
+      (-> tail
+          (str/replace #"-(?:\d{4}|\d{8}|\d{4}-\d{2}-\d{2})$" "")
+          (str/replace #"-preview(?=-|$)" ""))] [(parse-long major) (parse-long (or minor "0"))]]))
+
+(def ^:private current-line-versions
+  "Line → newest version of the `MODEL_ORDER` `:current` models on it."
+  (reduce (fn [acc model]
+            (let [[line version] (model-line model)]
+              (update acc line #(if (and % (version< version %)) % version))))
+          {}
+          (:current MODEL_ORDER)))
+
+(defn- line-version-order
+  "`compare` of `model-name`'s version with the newest current model of its line, or 0
+   when no current model is on that line."
+  ^long [model-name]
+  (let [[line version] (model-line model-name)]
+    (long (or (some->> (current-line-versions line)
+                       (compare version))
+              0))))
+
 (defn hidden-model?
   "True when model lists leave `model-name` out on every provider: stealth models
-   (`STEALTH_MODEL_NAMES`) and previews. Matching ignores case, an aggregator's `vendor/`
-   prefix and dotted versus dashed version separators. Hiding affects listings only: a model
-   configured by name still routes. `outdated-model?` adds the rules that depend on the
-   provider."
+   (`STEALTH_MODEL_NAMES`) and previews. A preview of a version newer than the current
+   model of its line stays listed, such as `qwen4-max-preview` next to `qwen3.8-max`.
+   Matching ignores case, an aggregator's `vendor/` prefix and dotted versus dashed version
+   separators. Hiding affects listings only: a model configured by name still routes.
+   `outdated-model?` adds the rules that depend on the provider."
   [model-name]
   (let [k (modelsdev/model-key model-name)]
-    (boolean (or (contains? STEALTH_MODEL_NAMES k) (re-find #"[-:]preview(?=[-:]|$)" k)))))
+    (boolean (or (contains? STEALTH_MODEL_NAMES k)
+                 (and (re-find preview-pattern k) (not (pos? (line-version-order k))))))))
 
 (defn- provider-model-source
   "Catalog id used to look up `KNOWN_PROVIDER_MODELS` (the svar wire/policy
@@ -2157,7 +2179,8 @@
 
 (defn outdated-model?
   "True when `provider-id`'s model lists leave `model-name` out as outdated: its version is
-   older than its family's `MIN_MODEL_VERSIONS` entry, it is a dated Claude snapshot, which
+   older than its family's `MIN_MODEL_VERSIONS` entry, a `MODEL_ORDER` `:current` model is a
+   newer version of its line (`glm-5.3` replaces `glm-5.2`), it is a dated Claude snapshot, which
    Anthropic also serves under an undated alias, or the provider's models.dev catalog marks
    it deprecated. Local providers such as Ollama and LM Studio list every model they serve.
    Like `hidden-model?`, this affects listings only."
@@ -2169,6 +2192,7 @@
                                 (version< [(parse-long major) (parse-long (or minor "0"))]
                                           min-version)))
                             min-version-patterns)
+                      (neg? (line-version-order k))
                       (re-find #"(?:^|-)claude-.+-\d{8}$" k)
                       (= "deprecated"
                          (:status (lookup-by-model-variants (modelsdev/provider-models

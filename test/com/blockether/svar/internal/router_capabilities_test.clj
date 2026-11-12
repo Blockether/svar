@@ -18,6 +18,12 @@
        (map (juxt :name identity))
        (into {})))
 
+(defn- anthropic
+  "Models of a native Anthropic entry that configures `model-names`. Configured models
+   route also when model lists leave them out as outdated."
+  [& model-names]
+  (models-of {:id :anthropic :api-key "test-key" :models (mapv #(hash-map :name %) model-names)}))
+
 (defn- copilot
   [& model-names]
   (models-of {:id :github-copilot
@@ -109,7 +115,7 @@
                    (expect (= router/VERBOSITY_LEVELS (:verbosity-options m)))))
              (it "leaves the key absent on wires that reject the field"
                  (doseq [m [(get (copilot "claude-sonnet-4.6") "claude-sonnet-4.6")
-                            (get (models-of {:id :anthropic :api-key "test-key"})
+                            (get (anthropic "claude-sonnet-4-6" "claude-haiku-4-5")
                                  "claude-sonnet-4-6")]]
                    (expect (nil? (:verbosity-style m)))
                    (expect (nil? (:verbosity-options m))))))
@@ -119,14 +125,14 @@
   "`:reasoning-effort-options` lists the exact rungs a caller may pin on the model's wire."
   (it "stamps every advertised rung for the depth-selectable tiers"
       (expect (= ["low" "medium" "high" "max"]
-                 (:reasoning-effort-options (get (models-of {:id :anthropic :api-key "test-key"})
+                 (:reasoning-effort-options (get (anthropic "claude-sonnet-4-6" "claude-haiku-4-5")
                                                  "claude-sonnet-4-6"))))
       (expect (= ["none" "low" "medium" "high" "xhigh"]
                  (:reasoning-effort-options (get (copilot "gpt-5.5") "gpt-5.5")))))
   (it "leaves the key absent when the model offers no rung"
       ;; Haiku 4.5 takes manual budget tokens; models.dev sells it no effort rung.
-      (expect (nil? (:reasoning-effort-options (get (models-of {:id :anthropic :api-key "test-key"})
-                                                    "claude-haiku-4-5"))))
+      (expect (nil? (:reasoning-effort-options
+                      (get (anthropic "claude-sonnet-4-6" "claude-haiku-4-5") "claude-haiku-4-5"))))
       (expect (nil? (:reasoning-effort-options (get (models-of {:id :custom-thinker
                                                                 :api-key "test-key"
                                                                 :base-url "https://example.test/v1"
@@ -141,7 +147,7 @@
   "`thinking.display` exists only on adaptive Claude thinking on the Anthropic wire."
   (it "stamps adaptive Claude with the style and its vocabulary"
       (doseq [m [(get (copilot "claude-opus-5") "claude-opus-5")
-                 (get (models-of {:id :anthropic :api-key "test-key"}) "claude-sonnet-4-6")]]
+                 (get (anthropic "claude-sonnet-4-6" "claude-haiku-4-5") "claude-sonnet-4-6")]]
         (expect (= :anthropic-display (:thinking-display-style m)))
         (expect (= router/THINKING_DISPLAY_OPTIONS (:thinking-display-options m)))
         (expect (= ["summarized" "omitted"] (:thinking-display-options m)))))

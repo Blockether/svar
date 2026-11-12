@@ -1586,9 +1586,7 @@
         ;; `:anthropic-coding-plan` prepends its FULL default catalog,
         ;; deduped against the caller's configured models.
         (expect (= ["claude-opus-5-5" "claude-sonnet-5-5" "claude-haiku-5-5" "claude-fable-5-2"
-                    "claude-fable-5-1" "claude-opus-5" "claude-fable-5" "claude-sonnet-5"
-                    "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6" "claude-sonnet-4-6"
-                    "claude-haiku-4-5"]
+                    "claude-opus-4-6" "claude-sonnet-4-6"]
                    (mapv :name (:models provider))))
         (expect (= :anthropic (:api-style provider)))
         (expect
@@ -2760,19 +2758,18 @@
                  ;; GPT/glm dotted ids resolve as-is first (their catalog keys are dotted).
                  (expect (= "gpt-5.4" (first (router/model-key-variants "gpt-5.4"))))))
 
-(defdescribe known-provider-default-models-test
-             (it "uses curated OpenAI Codex defaults when caller omits :models"
-                 (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
-                   (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol" "gpt-5.6-sol"
-                               "gpt-5.6-luna" "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
-                              (mapv :name (:models p))))
-                   (let [astra (get (into {} (map (juxt :name identity)) (:models p))
-                                    "gpt-6-astra")]
-                     (expect (= 272000 (:context astra)))
-                     (expect (= :frontier (:intelligence astra)))
-                     (expect (:reasoning? astra))
-                     (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                                (:reasoning-options astra)))))))
+(defdescribe
+  known-provider-default-models-test
+  (it "uses curated OpenAI Codex defaults when caller omits :models"
+      (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
+        (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
+                   (mapv :name (:models p))))
+        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
+          (expect (= 272000 (:context astra)))
+          (expect (= :frontier (:intelligence astra)))
+          (expect (:reasoning? astra))
+          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                     (:reasoning-options astra)))))))
 (defdescribe
   canonical-model-order-test
   (it "keeps every curated provider default list in canonical order"
@@ -2846,9 +2843,14 @@
   hidden-model-test
   (it "hides stealth models and previews"
       (doseq [model ["big-pickle" "opencode/omen-alpha" "ox-alpha-free" "space-bunny-free"
-                     "gemini-3.1-pro-preview" "google/gemini-3-flash-preview" "hy4-preview"
+                     "gemini-3.1-pro-preview" "google/gemini-3-flash-preview" "qwen3.8-max-preview"
                      "gpt-4o-audio-preview-2024-12-17"]]
         (expect (router/hidden-model? model) model)))
+  ;; Alibaba Token Plan served qwen4-max-preview, and the Vis model picker hid it.
+  (it "lists a preview that is newer than the current model of its line"
+      (doseq [model ["qwen4-max-preview" "alibaba/qwen4-max-preview" "hy4-preview"]]
+        (expect (not (router/hidden-model? model)) model))
+      (expect (router/provider-model-visible? :alibaba-token-plan "qwen4-max-preview")))
   (it "keeps current models listed"
       (doseq [model ["mimo-v2.6-pro" "xiaomi/mimo-v2.6-flash" "mimo-v3-pro" "gemini-2.5-pro"
                      "gemini-3.8-flash" "gpt-6-sol" "gpt-6.1-sol" "kimi-k3" "hy3" "deepseek-flash"]]
@@ -2882,13 +2884,19 @@
                      "MiMo-V2-Flash" "claude-sonnet-4-5" "anthropic/claude-opus-4.5"
                      "claude-3-5-sonnet-latest" "gpt-4o" "openai/gpt-5-mini" "gpt-4.1-mini"]]
         (expect (router/outdated-model? :openrouter model) model)))
+  ;; The Alibaba Token Plan picker listed glm-5.2 next to glm-5.3.
+  (it "leaves out a model when the current models list a newer version of its line"
+      (doseq [model ["glm-5.2" "z-ai/glm-5.2" "glm-5.1" "glm-5" "qwen3.7-max" "qwen3.6-flash"
+                     "deepseek-v4-flash" "deepseek-v4-flash-0731" "kimi-k2.6" "grok-4.6"
+                     "minimax-m2.7" "claude-opus-4-8" "claude-haiku-4-5" "claude-fable-5-1"
+                     "gpt-6-sol"]]
+        (expect (router/outdated-model? :alibaba-token-plan model) model)))
   (it "keeps current versions and models without a family minimum"
-      (doseq [model ["glm-5-turbo" "glm-5v-turbo" "glm-5.1" "glm-5.3-flash" "kimi-k2.6" "kimi-k3"
-                     "qwen3.6-plus" "qwen3.8-27b" "grok-4.6" "grok-4.20-multi-agent"
-                     "grok-code-fast-1" "minimax-m2.7" "minimax-m3" "mimo-v2.6-pro"
-                     "xiaomi/mimo-v2.6-flash" "mimo-v3-pro" "claude-haiku-4-5" "claude-sonnet-4.6"
-                     "claude-opus-4-6" "claude-fable-5-1" "gpt-5.3-codex" "gpt-6-sol" "gpt-6.1-sol"
-                     "gpt-oss-120b" "deepseek-v4-pro"]]
+      (doseq [model ["glm-5-turbo" "glm-5v-turbo" "glm-5.3" "glm-5.3-flash" "kimi-k3" "qwen3.6-plus"
+                     "qwen3.8-27b" "qwen4-max-preview" "grok-4.20-multi-agent" "grok-code-fast-1"
+                     "minimax-m3" "mimo-v2.6-pro" "xiaomi/mimo-v2.6-flash" "mimo-v3-pro"
+                     "deepseek-v4-pro-0813" "gpt-5.3-codex" "gpt-6.1-sol" "gpt-oss-120b"
+                     "deepseek-v4-pro"]]
         (expect (not (router/outdated-model? :openrouter model)) model)))
   (it "leaves out dated Claude snapshots"
       (expect (router/outdated-model? :anthropic-coding-plan "claude-haiku-4-5-20251001"))
@@ -2896,10 +2904,11 @@
   (it "leaves out models the provider's models.dev catalog marks deprecated"
       (with-redefs [modelsdev/provider-models (fn [pid]
                                                 (when (= :opencode-go pid)
-                                                  {"glm-5" {:status "deprecated"} "glm-5.1" {}}))]
-        (expect (router/outdated-model? :opencode-go "glm-5"))
-        (expect (not (router/outdated-model? :opencode-go "glm-5.1")))
-        (expect (not (router/outdated-model? :zai "glm-5")))))
+                                                  {"glm-5-turbo" {:status "deprecated"}
+                                                   "glm-5v-turbo" {}}))]
+        (expect (router/outdated-model? :opencode-go "glm-5-turbo"))
+        (expect (not (router/outdated-model? :opencode-go "glm-5v-turbo")))
+        (expect (not (router/outdated-model? :zai "glm-5-turbo")))))
   (it "lists every model a local provider serves"
       (doseq [pid
               [:ollama :lmstudio]
@@ -2910,11 +2919,11 @@
         (expect (not (router/outdated-model? pid model)) (str pid " " model))))
   (it "applies family minimums without a provider id"
       (expect (router/outdated-model? nil "glm-4.7"))
-      (expect (not (router/outdated-model? nil "glm-5.1"))))
+      (expect (not (router/outdated-model? nil "glm-5-turbo"))))
   (it "leaves outdated models out of provider model lists"
       (expect (not (router/provider-model-visible? :zai-coding-plan "glm-4.7")))
       (expect (not (router/provider-model-visible? :openai "gpt-4o")))
-      (expect (router/provider-model-visible? :openai "gpt-6-sol"))))
+      (expect (router/provider-model-visible? :openai "gpt-6.1-sol"))))
 
 (defdescribe chat-model-test
              ;; The Vis model pickers offered image and video models such as wan2.7-image, which cannot

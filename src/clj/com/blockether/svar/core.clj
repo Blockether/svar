@@ -153,7 +153,8 @@
 
 (def hidden-model?
   "True when model lists leave `model-name` out on every provider: stealth models and
-   previews. A model configured by name still routes."
+   previews, except a preview newer than the current model of its line. A model configured
+   by name still routes."
   router/hidden-model?)
 
 (def chat-model?
@@ -164,8 +165,9 @@
 (def provider-model-visible?
   "True when model lists offer `model-name` for the provider: its model filters allow
    it, it is a `chat-model?`, `hidden-model?` does not hide it, and it is not outdated there.
-   Outdated models are older than their family's minimum version, dated Claude snapshots or
-   deprecated in the provider's models.dev catalog; local providers list every model they serve."
+   Outdated models are older than their family's minimum version, older than a current model
+   of their line (`glm-5.2` next to `glm-5.3`), dated Claude snapshots or deprecated in the
+   provider's models.dev catalog; local providers list every model they serve."
   router/provider-model-visible?)
 
 (def resolve-effective-model

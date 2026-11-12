@@ -442,12 +442,12 @@
                      [{:id :github-copilot :api-key "sk-test" :models [{:name "gpt-6-sol"}]}])]
         (sut/clear-models-cache!)
         (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
-                                           {"data" [{"id" "claude-sonnet-4.6"} {"id" "gpt-4o"}
+                                           {"data" [{"id" "claude-sonnet-5.5"} {"id" "gpt-4o"}
                                                     {"id" "gpt-5.1-codex"} {"id" "gpt-5.3-codex"}
-                                                    {"id" "gpt-6-sol"} {"id" "gpt-6.1-sol"}
+                                                    {"id" "gpt-6-astra"} {"id" "gpt-6.1-sol"}
                                                     {"id" "gemini-3-pro-preview"}]})}
           (fn []
-            (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-6-sol" "gpt-6.1-sol"]
+            (expect (= ["claude-sonnet-5.5" "gpt-5.3-codex" "gpt-6-astra" "gpt-6.1-sol"]
                        (mapv :id (svar/models! router))))))))
   (it "leaves stealth, preview and old MiMo models out of /models output"
       (let [router (svar/make-router [{:id :openrouter
@@ -458,10 +458,10 @@
                                            {"data" [{"id" "xiaomi/mimo-v2.6-pro"}
                                                     {"id" "xiaomi/mimo-v2.5-pro"}
                                                     {"id" "google/gemini-3.1-pro-preview"}
-                                                    {"id" "anthropic/claude-sonnet-4.6"}
+                                                    {"id" "anthropic/claude-sonnet-5.5"}
                                                     {"id" "opencode/big-pickle"}]})}
           (fn []
-            (expect (= ["xiaomi/mimo-v2.6-pro" "anthropic/claude-sonnet-4.6"]
+            (expect (= ["xiaomi/mimo-v2.6-pro" "anthropic/claude-sonnet-5.5"]
                        (mapv :id (svar/models! router))))))))
   (it "keeps z.ai Coding Plan glm-5v-turbo and drops outdated GLM in /models output"
       (let [router (svar/make-router
