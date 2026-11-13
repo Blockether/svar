@@ -2851,6 +2851,14 @@
       (doseq [model ["qwen4-max-preview" "alibaba/qwen4-max-preview" "hy4-preview"]]
         (expect (not (router/hidden-model? model)) model))
       (expect (router/provider-model-visible? :alibaba-token-plan "qwen4-max-preview")))
+  ;; Before models.dev listed it, qwen4-max-preview got an 8192-token window and every
+  ;; Vis agent turn failed its context check.
+  (it "gives a model that the catalog does not list the limits of its line"
+      (let [entry (router/provider-model-entry :alibaba-token-plan "qwen4-max-preview")]
+        (expect (= {:context 1000000 :output-limit 131072}
+                   (select-keys entry [:context :input-limit :output-limit])))
+        (expect (nil? (:pricing entry))))
+      (expect (nil? (router/provider-model-entry :alibaba-token-plan "unlined-model"))))
   (it "keeps current models listed"
       (doseq [model ["mimo-v2.6-pro" "xiaomi/mimo-v2.6-flash" "mimo-v3-pro" "gemini-2.5-pro"
                      "gemini-3.8-flash" "gpt-6-sol" "gpt-6.1-sol" "kimi-k3" "hy3" "deepseek-flash"]]

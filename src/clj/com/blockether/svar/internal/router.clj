@@ -2229,6 +2229,23 @@
            (hidden-model? model-name)
            (outdated-model? provider-id model-name))))
 
+(defn- line-limits
+  "Token limits of the newest model on `model-name`'s line in `catalog-models`, for a model
+   that the provider serves before models.dev lists it. Alibaba Token Plan serves
+   `qwen4-max-preview` so: without the limits of `qwen3.8-max` it gets the 8192-token default
+   window, and every agent turn fails its context check. Prices stay unknown."
+  [catalog-models model-name]
+  (when-let [[line] (model-line model-name)]
+    (some->> catalog-models
+             (keep (fn [[id entry]]
+                     (let [[id-line version] (model-line id)]
+                       (when (and (= line id-line) (or (:context entry) (:input-limit entry)))
+                         [version entry]))))
+             (sort-by first compare)
+             last
+             second
+             (#(select-keys % [:context :input-limit :output-limit])))))
+
 (defn provider-model-entry
   "Returns provider-scoped entry for a provider/model, or nil if excluded.
 
@@ -2249,10 +2266,12 @@
           (lookup-by-model-variants (get KNOWN_PROVIDER_MODELS (provider-model-source provider-id))
                                     model-name)
 
+          catalog-models
+          (modelsdev/provider-models (provider-pricing-source provider-id))
+
           catalog
-          (lookup-by-model-variants (modelsdev/provider-models (provider-pricing-source
-                                                                 provider-id))
-                                    model-name)]
+          (or (lookup-by-model-variants catalog-models model-name)
+              (line-limits catalog-models model-name))]
 
       (when (or overlay catalog)
         (cond-> (merge catalog overlay)
