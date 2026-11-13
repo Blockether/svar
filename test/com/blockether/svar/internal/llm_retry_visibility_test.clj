@@ -177,7 +177,37 @@
                 (expect (<= 162000 (long failure/RETRY_PHASE_BUDGET_MS))))
             (it "is the same budget the router's same-provider phase spends"
                 (expect (= (long failure/RETRY_PHASE_BUDGET_MS)
-                           (long (:fallback-after-ms router/DEFAULT_RATE_LIMIT_ROUTING)))))))
+                           (long (:fallback-after-ms router/DEFAULT_RATE_LIMIT_ROUTING)))))
+            ;; Regression, vis#476: the phase was measured on the wall clock, so a
+            ;; retry wait that spanned hours of macOS sleep spent the whole budget.
+            (it "does not spend the budget while the monotonic clock stands still"
+                ;; Each attempt takes real wall time, as a host sleep does, while the
+                ;; monotonic clock does not move.
+                (let [attempts (atom 0)]
+                  (with-redefs [failure/monotonic-ms (constantly 0)]
+                    (expect (= :ok
+                               (#'llm/with-retry
+                                (fn []
+                                  (Thread/sleep 60)
+                                  (if (< (long (swap! attempts inc)) 3) (throw (overloaded!)) :ok))
+                                (assoc fast :budget-ms 50)))))
+                  (expect (= 3 @attempts))))
+            (it "still stops when awake time spends the budget"
+                (let [attempts
+                      (atom 0)
+
+                      now
+                      (atom 0)]
+
+                  (with-redefs [failure/monotonic-ms #(deref now)]
+                    (try (#'llm/with-retry
+                          (fn []
+                            (swap! attempts inc)
+                            (swap! now + 51)
+                            (throw (overloaded!)))
+                          (assoc fast :budget-ms 50))
+                         (catch clojure.lang.ExceptionInfo _ nil)))
+                  (expect (= 1 @attempts))))))
 
 ;; Regression, Vis retry composition: routed 5xx failures passed through the
 ;; seven-attempt low-level ladder inside every one of the router's seven attempts,

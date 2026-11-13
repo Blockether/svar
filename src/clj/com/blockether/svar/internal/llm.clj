@@ -2315,8 +2315,9 @@
    router's own `:llm.routing/provider-retry` shape, so every surface that
    already paints a provider retry paints this one too.
 
-   `:budget-ms` is the wall clock this ladder may spend (default
-   `failure/RETRY_PHASE_BUDGET_MS`). Attempts alone are not a budget: a 429
+   `:budget-ms` is the time this ladder may spend (default
+   `failure/RETRY_PHASE_BUDGET_MS`), measured on `failure/monotonic-ms`, so host
+   sleep during a wait does not spend it (vis#476). Attempts alone are not a budget: a 429
    carrying `Retry-After: 60` costs a minute per attempt, and a cooldown the
    phase cannot outlast is the router's problem, not another guaranteed 429."
   ([f] (with-retry f {}))
@@ -2327,7 +2328,7 @@
           initial-delay-ms failure/RETRY_INITIAL_DELAY_MS
           max-delay-ms failure/RETRY_MAX_DELAY_MS
           multiplier failure/RETRY_MULTIPLIER}}]
-   (let [started-ms (System/currentTimeMillis)]
+   (let [started-ms (long (failure/monotonic-ms))]
      (loop [attempt 1
             delay-ms initial-delay-ms]
 
@@ -2352,7 +2353,7 @@
                      plan (failure/retry-sleep-plan
                             err
                             {:fallback-ms (failure/backoff-ms delay-ms max-delay-ms)
-                             :elapsed-ms (- (System/currentTimeMillis) started-ms)
+                             :elapsed-ms (- (long (failure/monotonic-ms)) started-ms)
                              :budget-ms budget-ms})]
 
                  ;; No plan: the phase is spent, or the server declared a cooldown

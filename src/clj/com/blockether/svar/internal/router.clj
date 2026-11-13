@@ -2854,6 +2854,12 @@
 
 (defn- router-now-ms ^long [router] ((:clock router)))
 
+(defn- router-elapsed-ms
+  "Reading of the router's `:elapsed-clock`, for retry budgets and elapsed times
+   only. Never compare it with `router-now-ms`: their origins differ."
+  ^long [router]
+  ((or (:elapsed-clock router) (:clock router))))
+
 (defn- router-prune-window
   [router entries]
   (let [cutoff (- (router-now-ms router) (long (:window-ms router)))]
@@ -3640,10 +3646,12 @@
 
    Policy keys consulted:
      - `:same-provider-delays-ms` — vector of pre-retry sleeps;
-     - `:fallback-after-ms`       — wall-clock budget for the whole 429
-                                    phase (measured from `start-ms`,
-                                    which is when the first 429 was
-                                    caught for this provider attempt);
+     - `:fallback-after-ms`       — time budget for the whole 429
+                                    phase, measured on the router's
+                                    `:elapsed-clock` from `start-ms`
+                                    (the start of this provider attempt
+                                    on that clock), so host sleep does
+                                    not spend it;
      - `:respect-retry-after?`    — let server-side `Retry-After` header
                                     override the configured delay;
      - `:fallback-provider?`      — gate on whether a budget-exhausted
@@ -3663,7 +3671,7 @@
    Returns either `{:success ...}` (next call after sleep succeeded) or
    `{:error e :rate-limit-budget-exhausted? true :fallback-provider? ?
      :elapsed-ms N}` so the caller can emit a fallback event with the
-   measured wall-clock elapsed."
+   measured elapsed time."
   [router prefs trace provider model-map f e start-ms]
   (let [policy
         (:rate-limit router)
@@ -3676,7 +3684,7 @@
         (some? budget)
 
         elapsed*
-        #(- (long (router-now-ms router)) (long start-ms))
+        #(- (long (router-elapsed-ms router)) (long start-ms))
 
         budget-exhausted-result
         (fn [last-error]
@@ -3798,7 +3806,7 @@
    would rebuild the nested ladder this router deliberately collapsed."
   [router prefs trace provider model-map f e start-ms allowance]
   (let [elapsed*
-        #(- (router-now-ms router) (long start-ms))
+        #(- (router-elapsed-ms router) (long start-ms))
 
         delays
         (vec (:stream-recovery-delays-ms router))]
@@ -3898,7 +3906,7 @@
               (:id provider)
 
               start-ms
-              (router-now-ms router)]
+              (router-elapsed-ms router)]
 
           (loop []
 
@@ -3942,7 +3950,7 @@
                                               :attempt attempt
                                               :max-retries max-retries
                                               :delay-ms delay-ms
-                                              :elapsed-ms (- (router-now-ms router) start-ms)
+                                              :elapsed-ms (- (router-elapsed-ms router) start-ms)
                                               :error (ex-message e)}))
                             ;; Interruptible sleep — see comment in handle-rate-limit-retries.
                             (when (pos? delay-ms) (Thread/sleep delay-ms))
@@ -4123,7 +4131,10 @@
 
         (if-let [[provider model-map] (select-and-claim! router iter-prefs)]
           (let [pid (:id provider)
-                start-ms (router-now-ms router)]
+                start-ms (router-now-ms router)
+                ;; Retry budgets measure from here, not from the wall clock
+                ;; `start-ms`: host sleep must not spend them (vis#476).
+                elapsed-start-ms (router-elapsed-ms router)]
 
             (swap! tried conj pid)
             (when-not @selected
@@ -4174,7 +4185,7 @@
                                                              model-map
                                                              call-provider
                                                              e
-                                                             start-ms
+                                                             elapsed-start-ms
                                                              recovery-allowance)
                           (if (router-transient-error? router e)
                             (transient-replay-unsafe? e)
@@ -4186,7 +4197,7 @@
                           (throw (routed-failure e @trace @selected provider model-map))
                           ;; Watchdog spent its wait budget. Cross providers now.
                           (stream-watchdog-error? e)
-                          {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
+                          {:error e :elapsed-ms (- (router-elapsed-ms router) elapsed-start-ms)}
                           (router-transient-error? router e) (handle-rate-limit-retries
                                                                router
                                                                prefs
@@ -4195,7 +4206,7 @@
                                                                model-map
                                                                call-provider
                                                                e
-                                                               start-ms)
+                                                               elapsed-start-ms)
                           (= :quota-exhausted (:category (classify-failure e)))
                           {:provider-limit-error e}
                           (format-error? prefs e) {:format-error e}
@@ -4490,6 +4501,13 @@
                   (default [0 2400 3600 4800]; [] turns the re-send off)
      :failure-threshold - Int. Failures before circuit opens (default: 5)
      :recovery-ms       - Int. Ms before open→half-open (default: 60000)
+     :clock     - fn of no arguments that gives epoch ms (default: the wall clock).
+                  Rate-limit windows, reset times, the circuit breaker and
+                  prompt-cache samples use it.
+     :elapsed-clock - fn of no arguments that gives ms, for retry budgets and
+                  elapsed times only (default: `:clock` when given, else the
+                  monotonic clock). Host sleep does not move the monotonic clock,
+                  so a wait across a sleep does not spend a retry budget.
 
    Example:
      (make-router [{:id :blockether :api-key <key>
@@ -4557,6 +4575,7 @@
                :context-limits (merge MODEL_CONTEXT_LIMITS (:context-limits (:tokens opts)))
                :output-reserve (:output-reserve (:tokens opts))}
       :clock (get opts :clock #(System/currentTimeMillis))
+      :elapsed-clock (get opts :elapsed-clock (get opts :clock #(failure/monotonic-ms)))
       :window-ms (:window-ms merged)
       :cooldown-ms (:cooldown-ms merged)
       :max-wait-ms (:max-wait-ms merged)

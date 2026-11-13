@@ -8,6 +8,7 @@
    capture-style mocks for the `f` passed to `with-provider-fallback`, so
    we never hit real networks."
   (:require [lazytest.core :refer [defdescribe describe expect it throws?]]
+            [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.llm :as llm]
             [com.blockether.svar.internal.modelsdev :as modelsdev]
             [com.blockether.svar.internal.router :as router]))
@@ -605,6 +606,83 @@
         (expect (= [:p1] calls))
         (expect (empty? retries))
         (expect (some? (:thrown outcome))))))
+
+(defn- run-rate-limited-p1
+  "Routes one call on `r`. p1 answers 429 twice and calls `on-p1-call` before each
+   answer, p2 succeeds. Returns the providers called in order."
+  [r on-p1-call]
+  (let [calls
+        (atom [])
+
+        p1-calls
+        (atom 0)]
+
+    (router/with-provider-fallback
+      r
+      {}
+      (fn [provider _model]
+        (swap! calls conj (:id provider))
+        (if (= :p1 (:id provider))
+          (do (on-p1-call)
+              (if (< (long (swap! p1-calls inc)) 3) (transient-error 429) (success-result 100)))
+          (success-result 100))))
+    @calls))
+
+(def ^:private two-provider-rate-limit-opts
+  {:rate-limit {:same-provider-delays-ms [0 0] :fallback-after-ms 60000 :fallback-provider? true}})
+
+(def ^:private two-providers
+  [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+   {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+
+;; Regression, vis#476: the same-provider rate-limit phase was measured on the wall
+;; clock `:clock`, so a wait that spanned hours of macOS sleep spent its budget and
+;; the call crossed providers or failed on wake.
+(defdescribe
+  rate-limit-budget-host-sleep-test
+  (it "does not spend the phase when only the wall clock jumps"
+      (let [[clock wall]
+            (mock-clock)
+
+            [elapsed-clock _]
+            (mock-clock)
+
+            r
+            (llm/make-router two-providers
+                             (assoc two-provider-rate-limit-opts
+                               :clock clock
+                               :elapsed-clock elapsed-clock))]
+
+        ;; One hour of host sleep per attempt: the wall clock moves, the
+        ;; monotonic clock does not.
+        (expect (= [:p1 :p1 :p1] (run-rate-limited-p1 r #(advance! wall (* 60 60 1000)))))))
+  (it "still falls back when awake time spends the phase"
+      (let [[clock _]
+            (mock-clock)
+
+            [elapsed-clock elapsed]
+            (mock-clock)
+
+            r
+            (llm/make-router two-providers
+                             (assoc two-provider-rate-limit-opts
+                               :clock clock
+                               :elapsed-clock elapsed-clock))]
+
+        (expect (= [:p1 :p2] (run-rate-limited-p1 r #(advance! elapsed 60001))))))
+  (it "measures the phase on the monotonic clock when no clock is given"
+      (let [now (atom 0)]
+        (with-redefs [failure/monotonic-ms #(deref now)]
+          (let [r (llm/make-router two-providers two-provider-rate-limit-opts)]
+            (expect (= [:p1 :p2] (run-rate-limited-p1 r #(swap! now + 60001))))))))
+  (it "measures the phase on `:clock` when only `:clock` is given"
+      (let [[clock wall]
+            (mock-clock)
+
+            r
+            (llm/make-router two-providers (assoc two-provider-rate-limit-opts :clock clock))]
+
+        (expect (= [:p1 :p2] (run-rate-limited-p1 r #(advance! wall 60001)))))))
 
 (defdescribe
   with-provider-fallback-rate-limit-trace-test

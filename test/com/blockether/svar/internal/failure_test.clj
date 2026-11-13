@@ -388,10 +388,25 @@
         (expect (sut/healthy-host-connect-blip?
                   (ex-info "" {:url "http://healthy.test:4321/v1"} (java.net.ConnectException.)))))
     (it "expires outside the health window"
-        (reset! sut/host-connect-health* {"stale.test" (- (System/currentTimeMillis)
+        (reset! sut/host-connect-health* {"stale.test" (- (sut/monotonic-ms)
                                                           (inc (long
                                                                  sut/CONNECT_HEALTH_WINDOW_MS)))})
-        (expect (false? (sut/host-connection-healthy? "http://stale.test/v1"))))))
+        (expect (false? (sut/host-connection-healthy? "http://stale.test/v1")))))
+  ;; Regression, vis#476: the age was measured on the wall clock, so after hours of
+  ;; macOS sleep no host was healthy, and a ConnectException while the network came
+  ;; back up failed the turn without a retry.
+  (describe "health age ignores host sleep"
+            (let [;; Stamped 3 h of wall time ago; the monotonic clock stops during sleep.
+                  stamp (- (System/currentTimeMillis) (* 3 60 60 1000))]
+              (it "keeps a host healthy when only seconds of awake time passed"
+                  (with-redefs [sut/monotonic-ms (constantly (+ stamp 1000))]
+                    (reset! sut/host-connect-health* {"slept.test" stamp})
+                    (expect (sut/host-connection-healthy? "http://slept.test/v1"))))
+              (it "still expires after a window of awake time"
+                  (with-redefs [sut/monotonic-ms
+                                (constantly (+ stamp (inc (long sut/CONNECT_HEALTH_WINDOW_MS))))]
+                    (reset! sut/host-connect-health* {"slept.test" stamp})
+                    (expect (false? (sut/host-connection-healthy? "http://slept.test/v1"))))))))
 
 (defdescribe
   connection-error-test

@@ -1105,9 +1105,18 @@
    from the registry and fails fast instead of eating retry backoff."
   (* 5 60 1000))
 
+(defn monotonic-ms
+  "Milliseconds on the JVM monotonic clock (`System/nanoTime`). Use it only to
+   measure elapsed time: the origin is arbitrary, so never compare it with epoch
+   milliseconds. A wall clock jump does not move it, and on macOS it stops while
+   the host sleeps. Thus a retry budget or a health age that it measures does not
+   count hours of system sleep as spent time (vis#476)."
+  []
+  (quot (System/nanoTime) 1000000))
+
 (def host-connect-health*
-  "host -> epoch-ms of its most recent successful connection. Drives the health
-   gate for message-less ConnectExceptions (see `CONNECT_HEALTH_WINDOW_MS`)."
+  "host -> `monotonic-ms` of its most recent successful connection. Drives the
+   health gate for message-less ConnectExceptions (see `CONNECT_HEALTH_WINDOW_MS`)."
   (atom {}))
 
 (defn mark-connection-healthy!
@@ -1115,7 +1124,7 @@
    received)."
   [url]
   (when-let [host (url->host url)]
-    (swap! host-connect-health* assoc host (System/currentTimeMillis)))
+    (swap! host-connect-health* assoc host (monotonic-ms)))
   nil)
 
 (defn host-connection-healthy?
@@ -1123,7 +1132,7 @@
    `CONNECT_HEALTH_WINDOW_MS` — recent proof the network path to it works."
   [url]
   (boolean (when-let [t (get @host-connect-health* (url->host url))]
-             (< (- (System/currentTimeMillis) (long t)) (long CONNECT_HEALTH_WINDOW_MS)))))
+             (< (- (long (monotonic-ms)) (long t)) (long CONNECT_HEALTH_WINDOW_MS)))))
 
 (defn message-less-connect-exception?
   "True when the cause chain holds a `java.net.ConnectException` with a blank
