@@ -530,7 +530,11 @@
                   (expect (false? (boolean (healthy-host-connect-blip? ex))))
                   (expect (false? (boolean (retryable-exception? ex))))))
             (it "expires: a stale success no longer counts as healthy"
-                (reset! host-connect-health* {"api.anthropic.com" 1}) ; epoch-ms 1 ⇒ ancient
+                ;; One window plus 1 ms ago on the monotonic clock. A fixed small stamp
+                ;; is not old: that clock can start at boot, minutes ago.
+                (reset! host-connect-health* {"api.anthropic.com"
+                                              (- (long (failure/monotonic-ms))
+                                                 (inc (long failure/CONNECT_HEALTH_WINDOW_MS)))})
                 (let [ex (connection-error->ex-info (java.net.ConnectException.)
                                                     "https://api.anthropic.com/v1/messages")]
                   (expect (false? (boolean (healthy-host-connect-blip? ex))))))))
