@@ -7240,7 +7240,9 @@
             (case (:provider ps)
               :anthropic
               (when (or (seq (:blocks ps)) (= "pause_turn" (:stop-reason ps)))
-                {:role "assistant" :content (vec (:blocks ps))})
+                ;; After a mid-output server-side fallback, the blocks of the
+                ;; declining model go now: the caller must never run its tool call.
+                {:role "assistant" :content (fallback-boundary-content (:blocks ps) true)})
 
               :openai-responses
               (responses-extract-assistant-message (:reasoning-items ps) final-content)

@@ -191,6 +191,52 @@
                                 (expect (= "claude-opus-4-8"
                                            (get-in r [:refusal-recovered :to])))))))))
 
+(def ^:private mid-output-stream
+  "Fable wrote a tool call, then declined; the fallback model wrote its own tool call."
+  (sse
+    [{"type" "message_start"
+      "message" (assoc served-message
+                  "model" "claude-fable-5-2"
+                  "content" []
+                  "stop_reason" nil
+                  "usage" {"input_tokens" 412 "output_tokens" 0})}
+     {"type" "content_block_start"
+      "index" 0
+      "content_block" {"type" "tool_use" "id" "toolu_declined" "name" "run" "input" {}}}
+     {"type" "content_block_delta"
+      "index" 0
+      "delta" {"type" "input_json_delta" "partial_json" "{\"code\":\"a\"}"}}
+     {"type" "content_block_stop" "index" 0}
+     {"type" "content_block_start" "index" 1 "content_block" fallback-wire}
+     {"type" "content_block_stop" "index" 1}
+     {"type" "content_block_start"
+      "index" 2
+      "content_block" {"type" "tool_use" "id" "toolu_served" "name" "run" "input" {}}}
+     {"type" "content_block_delta"
+      "index" 2
+      "delta" {"type" "input_json_delta" "partial_json" "{\"code\":\"b\"}"}}
+     {"type" "content_block_stop" "index" 2}
+     {"type" "message_delta" "delta" {"stop_reason" "tool_use"} "usage" served-usage}
+     {"type" "message_stop"}]))
+
+(defdescribe server-fallback-tool-call-test
+             (it "returns only the tool call of the model that served the reply"
+                 (fixture
+                   (fn [_ _]
+                     {:sse mid-output-stream})
+                   (fn [router _]
+                     (let [r (ask router
+                                  "claude-fable-5-2"
+                                  {:server-fallbacks "default"
+                                   :on-chunk (fn [_])
+                                   :tools [{:name "run"
+                                            :description "Run code."
+                                            :schema {:type "object"
+                                                     :properties {:code {:type "string"}}}}]})]
+                       (expect (= ["toolu_served"] (mapv :id (:tool-calls r))))
+                       (expect (= ["fallback" "tool_use"]
+                                  (mapv :type (get-in r [:assistant-message :content])))))))))
+
 (defdescribe
   server-fallback-replay-test
   (it "echoes the fallback block in place and keeps the fallback model's signed thinking"
