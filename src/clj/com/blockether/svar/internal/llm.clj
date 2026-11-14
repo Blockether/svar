@@ -2341,7 +2341,9 @@
         {:content-delta nil
          :reasoning-delta nil
          :api-usage (usage/anthropic-canonical (get-in chunk ["message" "usage"]))
-         :provider-state {:provider :anthropic :id (get-in chunk ["message" "id"])}}
+         :provider-state {:provider :anthropic
+                          :id (get-in chunk ["message" "id"])
+                          :model (get-in chunk ["message" "model"])}}
 
         "message_stop"
         {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
@@ -9104,7 +9106,7 @@
             ;;   - unknown/truncated -> :svar.llm/empty-content, resend-eligible
             ;;     (emission stall on an accepted request; healed by
             ;;     `call-with-empty-reply-resend` before callers ever see it)
-            (when (str/blank? content)
+            (when (or (= "refusal" (:finish-reason stream-finalization)) (str/blank? content))
               (let [anomaly-type
                     (empty-reply-anomaly-type (some-> stream-finalization
                                                       :finish-reason
@@ -9901,6 +9903,19 @@
   [api-style]
   (if (= :openai-compatible-responses api-style) 16 1))
 
+(defn- anthropic-response-model
+  "The last model that served an Anthropic reply, including a mid-output handoff."
+  [assistant-message api-usage http-response provider-state]
+  (or (some->> (:content assistant-message)
+               (filter fallback-block?)
+               last
+               :to
+               (#(get % "model")))
+      (some #(when (= "fallback_message" (get % "type")) (get % "model"))
+            (reverse (get-in api-usage [:raw "iterations"])))
+      (get-in http-response [:parsed "model"])
+      (:model provider-state)))
+
 (defn ask-code!*
   "Low-level native-tool-calling completion — no routing. Prefer `ask-code!`
    which routes + falls back into this.
@@ -10148,7 +10163,8 @@
             ;; `call-with-empty-reply-resend` below and re-sent bounded times before
             ;; it ever reaches the caller.
             ;; A prompt-cache warm caps its output at a few tokens, so it skips this check.
-            (when (and (not warm?) (empty? tool-calls) (str/blank? content))
+            (when (or (= "refusal" (:finish-reason stream-finalization))
+                      (and (not warm?) (empty? tool-calls) (str/blank? content)))
               (when-let [anomaly-type (empty-reply-anomaly-type (some-> stream-finalization
                                                                         :finish-reason
                                                                         str)
@@ -10211,11 +10227,23 @@
     (let [tool-calls
           (vec (or tool-calls []))
 
+          response-model
+          (when (= :anthropic api-style)
+            (anthropic-response-model assistant-message api-usage http-response provider-state))
+
+          cost-model
+          (or response-model model)
+
+          served-pricing
+          (if (and provider-id (not= model cost-model))
+            (assoc pricing cost-model (router/provider-model-pricing provider-id cost-model))
+            pricing)
+
           token-stats
-          (router/count-and-estimate model
+          (router/count-and-estimate cost-model
                                      in-msgs
                                      (or content "")
-                                     {:pricing pricing
+                                     {:pricing served-pricing
                                       :api-usage api-usage
                                       :api-style api-style
                                       :input-tokens (or (:input-tokens request-accounting)
@@ -10226,10 +10254,10 @@
           ;; :tokens / :api-usage stay last-attempt (context-accurate).
           cost-stats
           (if (or empty-reply-resend-usage output-budget-resend-usage)
-            (router/count-and-estimate model
+            (router/count-and-estimate cost-model
                                        in-msgs
                                        (or content "")
-                                       {:pricing pricing
+                                       {:pricing served-pricing
                                         :api-usage (sum-api-usage [api-usage
                                                                    empty-reply-resend-usage
                                                                    output-budget-resend-usage])
@@ -10272,6 +10300,9 @@
                :cost cost
                :duration-ms duration-ms
                :prompt-cache-context cache-context}
+        response-model
+        (assoc :response-model response-model)
+
         request-accounting
         (assoc :request-accounting request-accounting)
 
@@ -10328,8 +10359,10 @@
                         :to (get-in (last blocks) [:to "model"])
                         :category (get-in (last blocks) [:trigger "category"])
                         :server-side? true}
-          served
-          {:from (:routed/model result) :to (get served "model") :category nil :server-side? true}
+          served {:from (:routed/model result)
+                  :to (or (get served "model") (:response-model result))
+                  :category nil
+                  :server-side? true}
           :else nil)))
 
 (defn ask-code!
@@ -10834,46 +10867,59 @@
               result
               (do
                 (swap! transport-state assoc :request-active? true)
-                (try (binding [*responses-session-transport*
-                               (fn [request-body completion-opts fallback!]
-                                 (responses-session-completion! transport-state
-                                                                request-body
-                                                                ;; The endpoint this body was just built for
-                                                                ;; decides the delta's cache markers too, and a
-                                                                ;; self-heal retry rebuilds the delta with it.
-                                                                (messages->responses-input
-                                                                  full-messages
-                                                                  (count new-messages)
-                                                                  active-model
-                                                                  (responses-explicit-cache?
-                                                                    provider-id
-                                                                    (:base-url completion-opts)))
-                                                                (merge completion-opts session-opts)
-                                                                fallback!))
+                (try
+                  (binding [*responses-session-transport*
+                            (fn [request-body completion-opts fallback!]
+                              (responses-session-completion! transport-state
+                                                             request-body
+                                                             ;; The endpoint this body was just built for
+                                                             ;; decides the delta's cache markers too, and a
+                                                             ;; self-heal retry rebuilds the delta with it.
+                                                             (messages->responses-input
+                                                               full-messages
+                                                               (count new-messages)
+                                                               active-model
+                                                               (responses-explicit-cache?
+                                                                 provider-id
+                                                                 (:base-url completion-opts)))
+                                                             (merge completion-opts session-opts)
+                                                             fallback!))
 
-                               *anthropic-session-transport*
-                               (when (= :anthropic-message-threads backend)
-                                 (fn [body headers send!]
-                                   (threads/complete! transport-state
-                                                      body
-                                                      headers
-                                                      send!
-                                                      {:delta-count (count (remove #(= "system"
-                                                                                       (some->
-                                                                                         (:role %)
-                                                                                         name))
-                                                                             new-messages))
-                                                       :reset? replace-history?})))]
+                            *anthropic-session-transport*
+                            (when (= :anthropic-message-threads backend)
+                              (fn [body headers send!]
+                                (threads/complete! transport-state
+                                                   body
+                                                   headers
+                                                   send!
+                                                   {:delta-count (count (remove #(= "system"
+                                                                                    (some-> (:role
+                                                                                              %)
+                                                                                            name))
+                                                                          new-messages))
+                                                    :reset? replace-history?})))]
 
-                       (let [result (ask-code! router call-opts)]
-                         (when (= :anthropic-message-threads backend)
-                           (threads/accept! transport-state))
-                         result))
-                     (catch Throwable error
-                       (when (= :anthropic-message-threads backend)
-                         (threads/discard! transport-state))
-                       (throw error))
-                     (finally (swap! transport-state dissoc :request-active?))))
+                    (let [result (try (ask-code! router call-opts)
+                                      (catch clojure.lang.ExceptionInfo error
+                                        (if (and (= :anthropic-message-threads backend)
+                                                 (refusal-ex? error))
+                                          (let [data (ex-data error)]
+                                            (assoc (select-keys data
+                                                                [:content :api-usage :http-response
+                                                                 :stream-finalization :stop-details
+                                                                 :duration-ms])
+                                              :stop-reason :refusal
+                                              :tool-calls []
+                                              :assistant-message (assistant (or (:content data)
+                                                                                ""))))
+                                          (throw error))))]
+                      (when (= :anthropic-message-threads backend)
+                        (threads/accept! transport-state))
+                      result))
+                  (catch Throwable error
+                    (when (= :anthropic-message-threads backend) (threads/discard! transport-state))
+                    (throw error))
+                  (finally (swap! transport-state dissoc :request-active?))))
 
               assistant-message
               (or (:assistant-message result)

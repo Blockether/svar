@@ -237,7 +237,10 @@
                                                             :stop_reason "refusal"))
                                                 (response (message "msg_ok" "Yes."))])]
           (with-open [session (open-thread {})]
-            (expect (= "No." (:content (svar/ask! session "one"))))
+            (let [result (svar/ask! session "one")]
+              (expect (= "No." (:content result)))
+              (expect (= :refusal (:stop-reason result)))
+              (expect (= [] (:tool-calls result))))
             (expect (= "Yes." (:content (svar/ask! session "rephrased"))))
             (expect (= 5 (count (svar/session-history session)))))
           (expect (= [{:role "user" :content "rephrased"}]

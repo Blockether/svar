@@ -3,6 +3,7 @@
    `server-side-fallback-2026-07-01`) across the public HTTP/SSE boundary."
   (:require [com.blockether.svar.core :as svar]
             [com.blockether.svar.internal.llm :as llm]
+            [com.blockether.svar.internal.router :as router]
             [lazytest.core :refer [defdescribe describe it expect]]
             [charred.api :as json]
             [clojure.string :as str])
@@ -281,3 +282,101 @@
                    (mapv :type (:content (first (sanitize [msg] nil false true))))))
         (expect (= ["text" "text"]
                    (mapv :type (:content (first (sanitize [msg] nil false false)))))))))
+
+(defdescribe
+  fallback-response-cost-test
+  (doseq [stream?
+          [false true]
+
+          sticky?
+          [false true]]
+
+    (it
+      (str "prices the serving model: stream=" stream? ", sticky=" sticky?)
+      (let [usage
+            (cond-> served-usage
+              sticky?
+              (assoc-in ["iterations" 1 "model"] nil))
+
+            message
+            (cond-> (assoc served-message "usage" usage)
+              sticky?
+              (assoc "content" [{"type" "text" "text" "answer"}]))
+
+            events
+            [{"type" "message_start"
+              "message" (assoc message
+                          "content" []
+                          "stop_reason" nil)}
+             {"type" "content_block_start"
+              "index" 0
+              "content_block" {"type" "text" "text" "answer"}}
+             {"type" "content_block_stop" "index" 0}
+             {"type" "message_delta" "delta" {"stop_reason" "end_turn"} "usage" usage}
+             {"type" "message_stop"}]]
+
+        (with-redefs [router/provider-model-pricing (fn [_ model]
+                                                      (if (= "claude-opus-4-8" model)
+                                                        {:input 1.0 :output 2.0}
+                                                        {:input 10.0 :output 20.0}))]
+          (fixture (fn [_ _]
+                     (if stream? {:sse (if sticky? (sse events) served-stream)} {:json message}))
+                   (fn [router _]
+                     (let [r (ask router
+                                  "claude-fable-5-2"
+                                  (cond-> {:server-fallbacks "default"}
+                                    stream?
+                                    (assoc :on-chunk
+                                      (fn [_]))))]
+                       (expect (= "claude-fable-5-2" (:routed/model r)))
+                       (expect (< (Math/abs (- 0.00094 (get-in r [:cost :total-cost]))) 1.0e-10))
+                       (expect (= "claude-opus-4-8" (:response-model r)))
+                       (expect (= "claude-opus-4-8" (get-in r [:refusal-recovered :to])))))))))))
+
+(defdescribe
+  nonempty-refusal-test
+  (doseq [stream?
+          [false true]
+
+          tool?
+          [false true]]
+
+    (it
+      (str "rejects refused output: stream=" stream? ", tool=" tool?)
+      (let [details
+            {"category" "cyber" "explanation" "declined"}
+
+            message
+            (cond-> (assoc served-message
+                      "stop_reason" "refusal"
+                      "stop_details" details)
+              tool?
+              (assoc "content"
+                [{"type" "tool_use" "id" "refused-tool" "name" "run" "input" {"code" "partial"}}]))
+
+            stream
+            (-> (if tool? mid-output-stream served-stream)
+                (str/replace
+                  (if tool? "\"stop_reason\":\"tool_use\"" "\"stop_reason\":\"end_turn\"")
+                  (str "\"stop_reason\":\"refusal\",\"stop_details\":"
+                       (json/write-json-str details))))]
+
+        (fixture (fn [_ _]
+                   (if stream? {:sse stream} {:json message}))
+                 (fn [router seen]
+                   (let [error (try (ask router
+                                         "claude-fable-5-2"
+                                         (cond-> {:server-fallbacks "default"
+                                                  :tools [{:name "run"
+                                                           :description "Run code."
+                                                           :schema {:type "object"
+                                                                    :properties
+                                                                    {:code {:type "string"}}}}]}
+                                           stream?
+                                           (assoc :on-chunk
+                                             (fn [_]))))
+                                    nil
+                                    (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+                     (expect (= :svar.llm/refusal (:type error)))
+                     (expect (= details (:stop-details error)))
+                     (expect (= 1 (count @seen))))))))))
