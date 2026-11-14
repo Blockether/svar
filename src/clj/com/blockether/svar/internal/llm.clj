@@ -1201,6 +1201,11 @@
   [block]
   (and (map? block) (= "thinking" (:type block))))
 
+(defn- fallback-block?
+  "True for the `fallback` block that marks an Anthropic server-side fallback handoff."
+  [block]
+  (and (map? block) (= "fallback" (:type block))))
+
 (defn- canonical-thinking->anthropic-block
   "Translates canonical thinking to Anthropic wire shape."
   [block]
@@ -1253,18 +1258,21 @@
    reordered or demoted (see `preserved-thinking-replay-messages` in
    Vis loop.clj). This is Anthropic-only."
   [blocks]
-  (let [{:keys [out _]} (reduce (fn [{:keys [out seen-non-thinking?]} b]
-                                  (cond (not (canonical-thinking-block? b))
-                                        {:out (conj out b) :seen-non-thinking? true}
-                                        seen-non-thinking?
-                                        ;; Interior thinking - demote to text. Drops the
-                                        ;; signature on purpose; Anthropic would reject it
-                                        ;; anyway and the visible text round-trips fine.
-                                        {:out (conj out {:type "text" :text (or (:thinking b) "")})
-                                         :seen-non-thinking? true}
-                                        :else {:out (conj out b) :seen-non-thinking? false}))
-                                {:out [] :seen-non-thinking? false}
-                                blocks)]
+  (let [{:keys [out _]}
+        (reduce (fn [{:keys [out seen-non-thinking?]} b]
+                  (cond ;; The fallback model's own thinking leads its part
+                        ;; of the content: keep it signed.
+                    (fallback-block? b) {:out (conj out b) :seen-non-thinking? false}
+                    (not (canonical-thinking-block? b)) {:out (conj out b) :seen-non-thinking? true}
+                    seen-non-thinking?
+                    ;; Interior thinking - demote to text. Drops the
+                    ;; signature on purpose; Anthropic would reject it
+                    ;; anyway and the visible text round-trips fine.
+                    {:out (conj out {:type "text" :text (or (:thinking b) "")})
+                     :seen-non-thinking? true}
+                    :else {:out (conj out b) :seen-non-thinking? false}))
+                {:out [] :seen-non-thinking? false}
+                blocks)]
     out))
 
 (defn- anthropic-message-content
@@ -1663,6 +1671,67 @@
                 (vec (remove canonical-thinking-block? (normalize-content (vec blocks))))))
       msg)))
 
+(defn- fallback-boundary-content
+  "Apply Anthropic's replay rules for a server-side fallback to one assistant content
+   vector. Before the final `fallback` block, drop thinking, `connector_text`, client
+   `tool_use` and a server tool call without its result: the declining model made
+   them. Keep the rest in its place.
+
+   `keep-boundary?` is true only when the request carries `fallbacks`: the `fallback`
+   block then stays where it appeared, because the API uses its position to validate
+   the thinking around it. Without `fallbacks`, drop every `fallback` block and every
+   thinking block of the message, because no boundary then explains a thinking block
+   that the fallback model signed. Content without a `fallback` block is unchanged."
+  [blocks keep-boundary?]
+  (let [blocks
+        (vec blocks)
+
+        last-idx
+        (last (keep-indexed #(when (fallback-block? %2) %1) blocks))]
+
+    (if (nil? last-idx)
+      blocks
+      (let [result-ids
+            (into #{}
+                  (keep #(when (str/ends-with? (str (:type %)) "_tool_result") (:tool_use_id %)))
+                  blocks)
+
+            declined-only?
+            (fn [b]
+              (case (:type b)
+                ("thinking" "redacted_thinking" "connector_text" "tool_use")
+                true
+
+                ("server_tool_use" "mcp_tool_use")
+                (not (contains? result-ids (:id b)))
+
+                false))]
+
+        (into []
+              (keep-indexed (fn [i b]
+                              (when-not (or (and (< (long i) (long last-idx)) (declined-only? b))
+                                            (and (not keep-boundary?)
+                                                 (or (fallback-block? b)
+                                                     (canonical-thinking-block? b))))
+                                b)))
+              blocks)))))
+
+(defn- resolve-fallback-boundaries
+  "Apply `fallback-boundary-content` to each assistant message that has a `fallback`
+   block. Other messages stay as they are."
+  [messages keep-boundary?]
+  (mapv (fn [m]
+          (if (and (= "assistant"
+                      (some-> (:role m)
+                              name))
+                   (sequential? (:content m))
+                   (some fallback-block? (:content m)))
+            (update m
+                    :content
+                    #(fallback-boundary-content (normalize-content (vec %)) keep-boundary?))
+            m))
+        messages))
+
 (defn- content-blocks-of-type
   "The values under `key` for every `type-str` block in `msg`'s content vector."
   [msg type-str key]
@@ -1803,9 +1872,12 @@
    target wire (`openai?` preserves the Responses composite `call_id|item_id`),
    and synthesizes a placeholder result for any orphaned tool call
    (failed/interrupted before its result was recorded). Idempotent and safe on
-   any message array; `target-model` is the model the request is being built for."
+   any message array; `target-model` is the model the request is being built for.
+   `keep-fallback-boundary?` is true only for an Anthropic request that carries
+   `fallbacks` (see `fallback-boundary-content`)."
   ([messages target-model] (sanitize-replayed-messages messages target-model false))
-  ([messages target-model openai?]
+  ([messages target-model openai?] (sanitize-replayed-messages messages target-model openai? false))
+  ([messages target-model openai? keep-fallback-boundary?]
    (-> (->> messages
             (filterv (fn [m]
                        (or (not= "assistant"
@@ -1813,6 +1885,7 @@
                                          name))
                            (assistant-turn-replayable? m))))
             (mapv #(strip-foreign-thinking % target-model)))
+       (resolve-fallback-boundaries keep-fallback-boundary?)
        (normalize-tool-ids openai?)
        synthesize-orphan-tool-results)))
 
@@ -1855,7 +1928,7 @@
    ;; (string). Anthropic only accepts string role names; we normalise
    ;; here so callers can pass either.
    (let [messages
-         (sanitize-replayed-messages messages model)
+         (sanitize-replayed-messages messages model false (contains? extra-body :fallbacks))
 
          [tools tool-choice extra-body]
          (extra-body-tools extra-body)
@@ -8055,6 +8128,9 @@
      family historically leaks prose into
      `content` under `:deep` reasoning).
    - `:llm-headers` merges provider defaults with caller headers; caller wins.
+   - `:server-fallbacks` (`\"default\"` or a list of models) becomes the Anthropic
+     `fallbacks` body field only where `router/server-fallbacks-wire` allows it
+     for this provider and model; other attempts never carry it.
    - routed primitives carry `:router-handles-transients?`, making the router
      the sole owner of retry schedule, budget, telemetry, and fallback."
   [opts provider model-map]
@@ -8084,6 +8160,10 @@
                                            {:preserved-thinking? (:preserved-thinking? opts)}))
                                        (:thinking-display opts))
 
+        server-fallbacks
+        (when (= :anthropic api-style)
+          (router/server-fallbacks-wire (:id provider) (:name model-map) (:server-fallbacks opts)))
+
         merged-body
         (cond-> (merge (:extra-body provider)
                        (:extra-body model-map)
@@ -8092,6 +8172,12 @@
                        (router/keyword-body (:extra-body opts)))
           (:verbosity opts)
           (assoc :verbosity (:verbosity opts)))
+
+        ;; A caller's own `:fallbacks` in `:extra-body` wins.
+        merged-body
+        (cond-> merged-body
+          (and server-fallbacks (not (contains? merged-body :fallbacks)))
+          (assoc :fallbacks server-fallbacks))
 
         merged-headers
         (not-empty (merge (:llm-headers provider) (:llm-headers opts)))
@@ -8109,7 +8195,8 @@
                 :reasoning-effort
                 :preferred-reasoning-effort
                 :preserved-thinking?
-                :thinking-display)
+                :thinking-display
+                :server-fallbacks)
         (assoc :model (:name model-map)
                :api-key (:api-key provider)
                :base-url (:base-url provider)
@@ -10222,6 +10309,27 @@
         output-budget-resend-usage
         (assoc :output-budget-resend-usage output-budget-resend-usage)))))
 
+(defn- server-refusal-recovery
+  "`{:from :to :category :server-side? true}` when Anthropic's server-side fallback
+   served `result`, else nil. A `fallback` content block marks a handoff in this
+   reply. A `fallback_message` usage entry without that block marks a turn that
+   sticky routing sent straight to the fallback model; it names no category."
+  [result]
+  (let [blocks
+        (filter fallback-block? (get-in result [:assistant-message :content]))
+
+        served
+        (some #(when (= "fallback_message" (get % "type")) %)
+              (get-in result [:api-usage :raw "iterations"]))]
+
+    (cond (seq blocks) {:from (get-in (first blocks) [:from "model"])
+                        :to (get-in (last blocks) [:to "model"])
+                        :category (get-in (last blocks) [:trigger "category"])
+                        :server-side? true}
+          served
+          {:from (:routed/model result) :to (get served "model") :category nil :server-side? true}
+          :else nil)))
+
 (defn ask-code!
   "Native tool-calling completion. Routed sibling of `ask!` (which is for
    structured `:spec` output). The model takes ACTION by calling a tool; when
@@ -10383,7 +10491,10 @@
                 (assoc :refusal-recovered
                   {:from (:model (first tried))
                    :to (get-in opts [:routing :model])
-                   :fallbacks-tried tried}))
+                   :fallbacks-tried tried})
+
+                (and (empty? tried) (server-refusal-recovery result))
+                (assoc :refusal-recovered (server-refusal-recovery result)))
               (let [e (:refusal outcome)
                     details (:stop-details (ex-data e))
                     ;; the model that actually refused, straight from the typed
@@ -10416,6 +10527,7 @@
                 ;; stack on the retry.
                 (recur (-> opts
                            (assoc :routing (assoc (or (:routing opts) {}) :model next-model))
+                           (dissoc :server-fallbacks)
                            (update :extra-body dissoc :fallbacks))
                        (vec (rest remaining))
                        (conj tried {:model from-model :category (get details "category")}))))))))))

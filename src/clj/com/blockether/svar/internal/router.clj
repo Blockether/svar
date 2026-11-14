@@ -32,6 +32,12 @@
                ;; costs more (2x base, not 1.25x), and a read stays at 0.1x. Plan tiers with
                ;; `:provider-model-source :anthropic` inherit this policy.
                :prompt-cache {:strategy :explicit-breakpoints :ttl :1h}
+               ;; Models that accept the `fallbacks` body field (server-side refusal
+               ;; fallback, beta `server-side-fallback-2026-07-01`). Claude Haiku 5.5 is
+               ;; left out: it has no server-side fallback and a model list returns 400.
+               ;; The OAuth plan tier accepts the field too (live check, 2026-11-14).
+               :server-fallback {:models
+                                 "(?i)^claude-(fable|mythos)-5|^claude-opus-5|^claude-sonnet-5-5"}
                :default-models [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"}
                                 {:name "claude-haiku-5-5"} {:name "claude-fable-5-2"}]}
    :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
@@ -2334,6 +2340,32 @@
    `provider-id` is a keyword or a string."
   [provider-id]
   (known-provider-policy provider-id :fast-mode))
+
+(defn server-fallbacks-wire
+  "The Anthropic `fallbacks` body value for a request to `model-name` on `provider-id`,
+   or nil when that provider or model has no server-side refusal fallback.
+
+   `fallbacks` is `\"default\"` (or `:default`): Anthropic picks the fallback model for
+   the refusal category. Else it is a list of model names or `{:model …}` maps: the
+   requested model is removed, duplicates are removed and at most three stay, as the
+   API requires. An empty result gives nil."
+  [provider-id model-name fallbacks]
+  (let [{:keys [models]}
+        (known-provider-policy provider-id :server-fallback)
+
+        model
+        (some-> model-name
+                str)]
+
+    (when (and models fallbacks model (re-find (re-pattern models) model))
+      (if (contains? #{"default" :default} fallbacks)
+        "default"
+        (not-empty (into []
+                         (comp (map #(if (map? %) % {:model (str %)}))
+                               (remove #(= model (str (or (:model %) (get % "model")))))
+                               (distinct)
+                               (take 3))
+                         fallbacks))))))
 
 (defn fast-mode-router
   "Put the fast service tier on the router entry of each provider in `provider-ids`
