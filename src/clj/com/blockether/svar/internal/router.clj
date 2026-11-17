@@ -23,7 +23,7 @@
 (def KNOWN_PROVIDERS
   {:openai {:base-url "https://api.openai.com/v1"
             :env-keys ["OPENAI_API_KEY"]
-            :default-models [{:name "gpt-6.1-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}]}
+            :default-models [{:name "gpt-6.2-sol"} {:name "gpt-6.2-astra"} {:name "gpt-6-luna"}]}
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
@@ -116,8 +116,8 @@
     :models-base :host
     :models-shape :github-copilot
     :default-models [{:name "claude-opus-5.5"} {:name "claude-sonnet-5.5"}
-                     {:name "claude-haiku-5.5"} {:name "claude-fable-5.2"} {:name "gpt-6.1-sol"}
-                     {:name "gpt-6-astra"} {:name "gpt-6-luna"} {:name "gpt-5.6-terra"}]
+                     {:name "claude-haiku-5.5"} {:name "claude-fable-5.2"} {:name "gpt-6.2-sol"}
+                     {:name "gpt-6.2-astra"} {:name "gpt-6-luna"} {:name "gpt-5.6-terra"}]
     :llm-headers {"Editor-Version" "vscode/1.100.0"
                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                   "Copilot-Integration-Id" "vscode-chat"
@@ -143,10 +143,9 @@
                   ;; Fast mode is Priority processing, billed at 2x Standard for input,
                   ;; cached input, cache writes and output.
                   :fast-mode {:service-tier "priority" :cost-multiplier 2.0}
-                  :default-models [{:name "gpt-6.1-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
-                                   {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
-                  ;; Keep Codex GPT models at gpt-5.3+ only.
-                  :min-gpt-version [5 3]
+                  :default-models [{:name "gpt-6.2-sol"} {:name "gpt-6.2-astra"}]
+                  ;; ChatGPT (Codex) serves GPT-6.2+ only: older models are retired.
+                  :min-gpt-version [6 2]
                   :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1"
                                     "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
                   ;; Codex plan: pull retail OpenAI pricing for metering
@@ -305,6 +304,16 @@
                   :capabilities #{:chat :vision}
                   :reasoning? true
                   :reasoning-style :openai-effort}
+   "gpt-6.2-sol" {:intelligence :frontier
+                  :speed :medium
+                  :capabilities #{:chat :vision}
+                  :reasoning? true
+                  :reasoning-style :openai-effort}
+   "gpt-6.2-astra" {:intelligence :frontier
+                    :speed :medium
+                    :capabilities #{:chat :vision}
+                    :reasoning? true
+                    :reasoning-style :openai-effort}
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
    "claude-fable-5-2" {:intelligence :frontier
                        :speed :slow
@@ -550,10 +559,10 @@
    family by release date, or after both lists, and puts dated snapshots, previews, aliases,
    helpers and deprecated models last."
   {:current [;; Flagships
-             "claude-opus-5-5" "gpt-6.1-sol" "kimi-k3" "grok-4.7" "qwen3.8-max" "glm-5.3"
+             "claude-opus-5-5" "gpt-6.2-sol" "kimi-k3" "grok-4.7" "qwen3.8-max" "glm-5.3"
              "deepseek-v4-pro" "minimax-m3" "longcat-2.0" "mimo-v2.6-pro"
              ;; Premium
-             "claude-fable-5-2" "gpt-6-astra"
+             "claude-fable-5-2" "gpt-6.2-astra"
              ;; Mid-size
              "claude-sonnet-5-5" "kimi-k2.7-code"
              ;; Fast
@@ -561,10 +570,11 @@
              "qwen3.8-flash" "mimo-v2.6-flash" "hy3" "muse-spark-1.3-contributor"]
    :previous ["claude-opus-5" "claude-fable-5-1" "claude-fable-5" "claude-sonnet-5"
               "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6" "claude-sonnet-4-6"
-              "claude-haiku-4-5" "gpt-6-sol" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.5" "gpt-5.4"
-              "gpt-5.6-luna" "gpt-5.3-codex" "grok-4.6" "kimi-k2.6" "qwen3.7-max" "qwen3.7-plus"
-              "qwen3.6-plus" "glm-5.2" "glm-5.1" "glm-5-turbo" "glm-5v-turbo" "deepseek-v4-flash"
-              "minimax-m2.7" "muse-spark-1.2-contributor"]})
+              "claude-haiku-4-5" "gpt-6.1-sol" "gpt-6-astra" "gpt-6-sol" "gpt-5.6-sol"
+              "gpt-5.6-terra" "gpt-5.5" "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex" "grok-4.6"
+              "kimi-k2.6" "qwen3.7-max" "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1"
+              "glm-5-turbo" "glm-5v-turbo" "deepseek-v4-flash" "minimax-m2.7"
+              "muse-spark-1.2-contributor"]})
 
 (def SPECIAL_MODEL_NAMES
   "Model ids `sort-models` puts last although their names look ordinary: `deepseek-flash`
@@ -1195,6 +1205,8 @@
   ;; https://developers.openai.com/api/docs/models/gpt-6-sol
   ;; https://developers.openai.com/api/docs/models/gpt-6-luna
   ;; https://developers.openai.com/api/docs/models/gpt-6.1-sol
+  ;; https://developers.openai.com/api/docs/models/gpt-6.2-sol
+  ;; https://developers.openai.com/api/docs/models/gpt-6.2-astra
   (let [common {:context 922000
                 ;; 1.05M total includes 128K output; enforce the input ceiling.
                 :input-limit 922000
@@ -1245,7 +1257,34 @@
                                :input-over-272k 4.00
                                :cached-input-over-272k 0.20
                                :cache-write-over-272k 5.00
-                               :output-over-272k 15.00})}))
+                               :output-over-272k 15.00})
+     ;; 6.2 Sol keeps the 6.1 Sol efforts and rates.
+     "gpt-6.2-sol" (assoc common
+                     :display-name "GPT-6.2 Sol"
+                     :reasoning-options [{:type "effort"
+                                          :values ["low" "medium" "high" "xhigh" "max"]}]
+                     :pricing {:input 2.00
+                               :cached-input 0.10
+                               :cache-read 0.10
+                               :cache-write 2.50
+                               :output 10.00
+                               :input-over-272k 4.00
+                               :cached-input-over-272k 0.20
+                               :cache-write-over-272k 5.00
+                               :output-over-272k 15.00})
+     "gpt-6.2-astra" (assoc common
+                       :display-name "GPT-6.2 Astra"
+                       :reasoning-options [{:type "effort"
+                                            :values ["low" "medium" "high" "xhigh" "max"]}]
+                       :pricing {:input 8.00
+                                 :cached-input 0.40
+                                 :cache-read 0.40
+                                 :cache-write 10.00
+                                 :output 40.00
+                                 :input-over-272k 16.00
+                                 :cached-input-over-272k 0.80
+                                 :cache-write-over-272k 20.00
+                                 :output-over-272k 60.00})}))
 
 ;; Pricing data last verified: 2026-04-12.
 ;; USD per million tokens. Values drift — re-audit quarterly.
@@ -1272,6 +1311,8 @@
   {:openai {"gpt-6-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6-sol")
             "gpt-6-luna" (get GPT6_SOL_LUNA_MODELS "gpt-6-luna")
             "gpt-6.1-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6.1-sol")
+            "gpt-6.2-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6.2-sol")
+            "gpt-6.2-astra" (get GPT6_SOL_LUNA_MODELS "gpt-6.2-astra")
             ;; Long-context tier pricing (>272k tokens) — not in models.dev.
             "gpt-5.4" {:pricing
                        {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
@@ -1279,50 +1320,17 @@
                                  :cached-input-over-272k 1.00
                                  :output-over-272k 45.00}}}
    :openai-codex
-   ;; Codex prompt budgets are independent of retail product windows.
-   ;; Pricing and other catalog metadata flow from `:pricing-source :openai`.
-   {"gpt-5" {:context 400000}
-    "gpt-5.1" {:context 128000}
-    "gpt-5.3-codex" {:context 272000}
-    "gpt-6-astra" {:context 272000 :input-limit 272000}
-    ;; Codex's bundled catalog keeps a 272K default. Ultra is a client-side
-    ;; subagent workflow, not an effort this single-inference client implements.
-    ;; https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
-    "gpt-6-sol" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6-sol")
-                  :context 272000
-                  :input-limit 272000
-                  :reasoning-options [{:type "effort"
-                                       :values ["low" "medium" "high" "xhigh" "max"]}])
-    "gpt-6-luna" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6-luna")
-                   :context 272000
-                   :input-limit 272000
-                   :reasoning-options [{:type "effort"
-                                        :values ["low" "medium" "high" "xhigh" "max"]}])
-    "gpt-6.1-sol" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6.1-sol")
-                    :context 272000
-                    :input-limit 272000)
-    "gpt-5.4" {:context 272000
-               :pricing
-               {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
-    "gpt-5.4-mini" {:context 272000}
-    "gpt-5.5" {:context 272000
-               :pricing
-               {:input-over-272k 10.00 :cached-input-over-272k 1.00 :output-over-272k 45.00}}
-    "gpt-5.6-luna" {:context 272000}
-    "gpt-5.6-sol" {:context 272000
-                   :pricing {:input 5.00
-                             :cached-input 0.50
-                             :output 30.00
-                             :input-over-272k 10.00
-                             :cached-input-over-272k 1.00
-                             :output-over-272k 45.00}}
-    "gpt-5.6-terra" {:context 272000
-                     :pricing {:input 5.00
-                               :cached-input 0.50
-                               :output 30.00
-                               :input-over-272k 10.00
-                               :cached-input-over-272k 1.00
-                               :output-over-272k 45.00}}}
+   ;; Codex prompt budgets are independent of retail product windows. The live
+   ;; `/codex/models` catalog gives a 500K `context_window` for 6.2 Sol and 272K for
+   ;; 6.2 Astra (checked 2026-11-17). Ultra is a client-side subagent workflow, not an
+   ;; effort this single-inference client implements. `:min-gpt-version` retires every
+   ;; older model; pricing flows from the shared GPT-6 rows.
+   {"gpt-6.2-sol" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6.2-sol")
+                    :context 500000
+                    :input-limit 500000)
+    "gpt-6.2-astra" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6.2-astra")
+                      :context 272000
+                      :input-limit 272000)}
    :anthropic
    ;; Pricing/context flow from models.dev (`internal/modelsdev`). Overlay keeps
    ;; ONLY what the catalog can't supply: the 1-hour cache-write tier
@@ -1645,6 +1653,8 @@
     "gpt-6-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6-sol")
     "gpt-6-luna" (get GPT6_SOL_LUNA_MODELS "gpt-6-luna")
     "gpt-6.1-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6.1-sol")
+    "gpt-6.2-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6.2-sol")
+    "gpt-6.2-astra" (get GPT6_SOL_LUNA_MODELS "gpt-6.2-astra")
     "gpt-4.1" {:pricing {:input 0.0 :output 0.0} :context 128000}
     "gpt-4o" {:pricing {:input 0.0 :output 0.0} :context 128000}
     ;; Gemini + Grok on Copilot also gate reasoning server-side

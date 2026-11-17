@@ -24,7 +24,7 @@
 
             router
             (svar/make-router
-              [{:id provider-id :base-url base :api-key "test" :models [{:name "gpt-6-astra"}]}])]
+              [{:id provider-id :base-url base :api-key "test" :models [{:name "gpt-6.2-astra"}]}])]
 
         (sut/clear-models-cache!)
         (with-redefs-fn {#'sut/http-post-stream!
@@ -35,9 +35,9 @@
                             :http-response {:status 200}})
                          #'sut/http-get! (fn [url & _args]
                                            (swap! calls conj url)
-                                           {"data" [{"id" "gpt-6-astra"}]})}
+                                           {"data" [{"id" "gpt-6.2-astra"}]})}
           (fn []
-            (doseq [[style model endpoint] [[:openai-compatible-responses "gpt-6-astra"
+            (doseq [[style model endpoint] [[:openai-compatible-responses "gpt-6.2-astra"
                                              "/responses"]
                                             [:openai-compatible-chat "gpt-5.3" "/chat/completions"]
                                             [:anthropic "claude-sonnet-5" "/v1/messages"]]]
@@ -52,7 +52,7 @@
               ;; `:models-base :host` ships on `:github-copilot` itself. An id a
               ;; config declares gets Copilot auth and the host-root chat wires,
               ;; but keeps its own configured base path for the catalog call.
-              (expect (= ["gpt-6-astra"] (mapv :id (svar/models! router))))
+              (expect (= ["gpt-6.2-astra"] (mapv :id (svar/models! router))))
               (expect (= "https://gateway.example.com/models" (last @calls))))))))))
 
 ;;; ── Test fixtures ──────────────────────────────────────────────────────
@@ -420,9 +420,9 @@
 
 (defdescribe
   provider-models-list-test
-  (it "filters OpenAI Codex /models below GPT-5.3"
+  (it "filters OpenAI Codex /models below GPT-6.2"
       (let [router (svar/make-router
-                     [{:id :openai-codex :api-key "sk-test" :models [{:name "gpt-5.5"}]}])]
+                     [{:id :openai-codex :api-key "sk-test" :models [{:name "gpt-6.2-sol"}]}])]
         ;; `http-get!` now takes an optional opts map (api-style /
         ;; provider-id / llm-headers / query-params) so callers don't
         ;; have to special-case OAuth headers per-provider. Use a
@@ -434,9 +434,10 @@
         (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                            {"data" [{"id" "gpt-4o"} {"id" "gpt-5"}
                                                     {"id" "gpt-5.1-codex"} {"id" "gpt-5.3-codex"}
-                                                    {"id" "gpt-5.4"} {"id" "gpt-5.5"}]})}
+                                                    {"id" "gpt-6-luna"} {"id" "gpt-6.1-sol"}
+                                                    {"id" "gpt-6.2-sol"} {"id" "gpt-6.2-astra"}]})}
           (fn []
-            (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"] (mapv :id (svar/models! router))))))))
+            (expect (= ["gpt-6.2-sol" "gpt-6.2-astra"] (mapv :id (svar/models! router))))))))
   (it "filters GitHub Copilot /models below GPT-5.3 while keeping non-GPT families"
       (let [router (svar/make-router
                      [{:id :github-copilot :api-key "sk-test" :models [{:name "gpt-6-sol"}]}])]
@@ -444,10 +445,10 @@
         (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                            {"data" [{"id" "claude-sonnet-5.5"} {"id" "gpt-4o"}
                                                     {"id" "gpt-5.1-codex"} {"id" "gpt-5.3-codex"}
-                                                    {"id" "gpt-6-astra"} {"id" "gpt-6.1-sol"}
+                                                    {"id" "gpt-6.2-astra"} {"id" "gpt-6.2-sol"}
                                                     {"id" "gemini-3-pro-preview"}]})}
           (fn []
-            (expect (= ["claude-sonnet-5.5" "gpt-5.3-codex" "gpt-6-astra" "gpt-6.1-sol"]
+            (expect (= ["claude-sonnet-5.5" "gpt-5.3-codex" "gpt-6.2-astra" "gpt-6.2-sol"]
                        (mapv :id (svar/models! router))))))))
   (it "leaves stealth, preview and old MiMo models out of /models output"
       (let [router (svar/make-router [{:id :openrouter
@@ -477,7 +478,7 @@
             (svar/make-router [{:id :openai-codex
                                 :api-key "sk-test"
                                 :llm-headers {"chatgpt-account-id" "acct_123"}
-                                :models [{:name "gpt-5.5"}]}])
+                                :models [{:name "gpt-6.2-sol"}]}])
 
             captured
             (atom nil)]
@@ -485,7 +486,7 @@
         (sut/clear-models-cache!)
         (with-redefs-fn {#'sut/http-get! (fn [url _api-key & [opts]]
                                            (reset! captured (assoc opts :url url))
-                                           {"models" [{"slug" "gpt-5.5" "id" "gpt-5.5"}]})}
+                                           {"models" [{"slug" "gpt-6.2-sol" "id" "gpt-6.2-sol"}]})}
           (fn []
             (svar/models! router)
             (let [c @captured]
@@ -500,33 +501,32 @@
               (expect (.endsWith ^String (:url c) "/codex/models")))))))
   (it "normalizes ChatGPT-backend `{:models [{:slug ...}]}` shape to {:id ...}"
       (let [router (svar/make-router
-                     [{:id :openai-codex :api-key "sk-test" :models [{:name "gpt-5.5"}]}])]
+                     [{:id :openai-codex :api-key "sk-test" :models [{:name "gpt-6.2-sol"}]}])]
         (sut/clear-models-cache!)
         (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
-                                           {"models" [{"slug" "gpt-5.5" "display_name" "GPT-5.5"}
-                                                      {"slug" "gpt-5.4"}
-                                                      {"slug" "gpt-5.3-codex"}]})}
+                                           {"models" [{"slug" "gpt-6.2-sol"
+                                                       "display_name" "GPT-6.2-Sol"}
+                                                      {"slug" "gpt-6.2-astra"}]})}
           (fn []
-            (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
-                       (sort (mapv :id (svar/models! router)))))))))
+            (expect (= ["gpt-6.2-astra" "gpt-6.2-sol"] (sort (mapv :id (svar/models! router)))))))))
   ;; A `/models` body is provider DATA. svar parses it with `:key-fn identity`
   ;; so a gateway can never grow this process's keyword table, and only svar's
   ;; OWN model contract (`:id`, `:name`, `:context`, capability flags) is
   ;; keyword-keyed on the way out.
   (it "never interns a /models body: wire keys stay strings, svar keys are lifted"
       (let [router (svar/make-router
-                     [{:id :openai-codex :api-key "sk-test" :models [{:name "gpt-5.5"}]}])]
+                     [{:id :openai-codex :api-key "sk-test" :models [{:name "gpt-6.3-sol"}]}])]
         (sut/clear-models-cache!)
         (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
-                                           {"data" [{"id" "gpt-5.5"
-                                                     "display_name" "GPT-5.5"
+                                           {"data" [{"id" "gpt-6.3-sol"
+                                                     "display_name" "GPT-6.3 Sol"
                                                      "model_info" {"max_input_tokens" 400000
                                                                    "supports_function_calling" true}
                                                      "a weird gateway key" 1}]})}
           (fn []
             (let [m (first (svar/models! router))]
-              (expect (= "gpt-5.5" (:id m)))
-              (expect (= "GPT-5.5" (:name m)))
+              (expect (= "gpt-6.3-sol" (:id m)))
+              (expect (= "GPT-6.3 Sol" (:name m)))
               (expect (= 400000 (:input-limit m)))
               (expect (true? (:tool-call? m)))
               (expect (= 1 (get m "a weird gateway key")))
@@ -547,7 +547,7 @@
             (svar/make-router [{:id :openai-codex
                                 :api-key "sk-test"
                                 :llm-headers {"chatgpt-account-id" "acct_123"}
-                                :models [{:name "gpt-5.5"}]}])
+                                :models [{:name "gpt-6.2-astra"}]}])
 
             answer-spec
             (svar/spec (svar/field svar/NAME
@@ -566,12 +566,12 @@
         (expect (= "/codex/responses" (:responses-path provider)))
         ;; Pricing now flows from models.dev catalog ⊕ overlay; catalog
         ;; contributes `:cache-read` so we assert overlay keys with select-keys.
-        (expect (= {:input 5.00
-                    :cached-input 0.50
-                    :output 30.00
-                    :input-over-272k 10.00
-                    :cached-input-over-272k 1.00
-                    :output-over-272k 45.00}
+        (expect (= {:input 8.00
+                    :cached-input 0.40
+                    :output 40.00
+                    :input-over-272k 16.00
+                    :cached-input-over-272k 0.80
+                    :output-over-272k 60.00}
                    (select-keys (:pricing model)
                                 [:input :cached-input :output :input-over-272k
                                  :cached-input-over-272k :output-over-272k])))
@@ -608,7 +608,8 @@
               (expect (nil? (:max_tokens body)))
               (expect (= false (:store body)))
               (expect (= ["reasoning.encrypted_content"] (:include body)))
-              (expect (= {:summary "auto"} (:reasoning body)))
+              ;; The model row adds the GPT-6 default effort to the provider's summary.
+              (expect (= {:effort "medium" :summary "auto"} (:reasoning body)))
               ;; Codex accepts the Responses `text` envelope like Codex CLI.
               ;; The caller's `:verbosity :high` replaces the provider's `low`.
               (expect (= "high" (get-in body [:text :verbosity]))))))))
@@ -1333,11 +1334,14 @@
   ;; Regression: the pre-catalog Astra overlay pinned Copilot to 272K input,
   ;; omitted the output ceiling and advertised an unsupported ultra effort.
   (it "resolves provider-specific Astra limits through routed pre-flight and output budgets"
-      (doseq [[provider-id input-budget output-budget] [[:github-copilot 922000 128000]
-                                                        [:openai-codex 272000 68000]]]
+      (doseq [[provider-id model-name input-budget output-budget pricing]
+              [[:github-copilot "gpt-6-astra" 922000 128000
+                {:input 10.0 :output 50.0 :cached-input 1.0}]
+               [:openai-codex "gpt-6.2-astra" 272000 68000
+                {:input 8.0 :output 40.0 :cached-input 0.4}]]]
         (let [provider (router/normalize-provider
                          0
-                         {:id provider-id :api-key "test" :models [{:name "gpt-6-astra"}]})
+                         {:id provider-id :api-key "test" :models [{:name model-name}]})
               model (first (:models provider))
               opts (#'sut/inject-routed-params {} provider model)
               resolved (#'sut/resolve-opts {} opts)
@@ -1348,10 +1352,9 @@
           (expect (= output-budget (get-in opts [:extra-body :max_tokens])))
           (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
                      (:reasoning-options model)))
-          (expect (= {:input 10.0 :output 50.0 :cached-input 1.0}
-                     (select-keys (:pricing model) [:input :output :cached-input])))
-          (expect (:ok? (router/check-context-limit "gpt-6-astra" [] check-opts)))
-          (expect (not (:ok? (router/check-context-limit "gpt-6-astra"
+          (expect (= pricing (select-keys (:pricing model) [:input :output :cached-input])))
+          (expect (:ok? (router/check-context-limit model-name [] check-opts)))
+          (expect (not (:ok? (router/check-context-limit model-name
                                                          []
                                                          (update check-opts :input-tokens inc)))))
           (when (= :github-copilot provider-id)
@@ -1366,10 +1369,13 @@
   (it
     "routes Sol and Luna with explicit input/output budgets and Responses replay"
     (doseq [model-name
-            ["gpt-6-sol" "gpt-6-luna" "gpt-6.1-sol"]
+            ["gpt-6-sol" "gpt-6-luna" "gpt-6.1-sol" "gpt-6.2-sol"]
 
             [provider-id input-budget output-budget]
-            [[:openai 922000 128000] [:openai-codex 272000 68000] [:github-copilot 922000 128000]]]
+            [[:openai 922000 128000] [:openai-codex 500000 125000] [:github-copilot 922000 128000]]
+
+            ;; ChatGPT (Codex) serves GPT-6.2 and later only.
+            :when (or (not= :openai-codex provider-id) (= "gpt-6.2-sol" model-name))]
 
       (let [provider
             (router/normalize-provider
@@ -1390,8 +1396,8 @@
 
             efforts
             (cond-> ["low" "medium" "high" "xhigh" "max"]
-              ;; GPT-6.1 Sol drops `none` on every surface.
-              (and (not= :openai-codex provider-id) (not= "gpt-6.1-sol" model-name))
+              ;; GPT-6.1 Sol and later drop `none` on every surface.
+              (not (contains? #{"gpt-6.1-sol" "gpt-6.2-sol"} model-name))
               (->> (into ["none"])))]
 
         (expect (= input-budget (:context model) (:input-limit model) (:context opts)))

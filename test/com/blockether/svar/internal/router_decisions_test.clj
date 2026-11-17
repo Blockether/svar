@@ -135,6 +135,7 @@
               {:keys [prefs]} (router/resolve-routing router {:optimize :cost :on-chunk cb})]
 
           (expect (identical? cb (:on-chunk prefs)))))))
+
 ;; =============================================================================
 ;; Tier 1 — with-provider-fallback happy/sad paths
 ;; =============================================================================
@@ -1685,6 +1686,7 @@
           (= {:input 8.0 :cached-input 0.2 :cache-write-5m 10.0 :cache-write-1h 16.0 :output 40.0}
              (select-keys (:pricing entry)
                           [:input :cached-input :cache-write-5m :cache-write-1h :output]))))))
+
 ;; =============================================================================
 ;; Tier 3 — `:reasoning` integrates with routing (selection filter)
 ;; =============================================================================
@@ -2099,6 +2101,7 @@
               ;; models slip through as non-reasoning — document via test.
               (it "o-series inference leaves :reasoning? unset"
                   (expect (nil? (:reasoning? (infer "o5-new"))))))))
+
 (defdescribe
   ask-with-reasoning-integration-test
   "End-to-end: `llm/ask!` routes the request through the reasoning filter so
@@ -2836,18 +2839,20 @@
                  ;; GPT/glm dotted ids resolve as-is first (their catalog keys are dotted).
                  (expect (= "gpt-5.4" (first (router/model-key-variants "gpt-5.4"))))))
 
-(defdescribe
-  known-provider-default-models-test
-  (it "uses curated OpenAI Codex defaults when caller omits :models"
-      (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
-        (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
-                   (mapv :name (:models p))))
-        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
-          (expect (= 272000 (:context astra)))
-          (expect (= :frontier (:intelligence astra)))
-          (expect (:reasoning? astra))
-          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                     (:reasoning-options astra)))))))
+(defdescribe known-provider-default-models-test
+             (it "uses curated OpenAI Codex defaults when caller omits :models"
+                 (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
+                   (expect (= ["gpt-6.2-sol" "gpt-6.2-astra"] (mapv :name (:models p))))
+                   (let [by-name (into {} (map (juxt :name identity)) (:models p))
+                         astra (get by-name "gpt-6.2-astra")]
+
+                     (expect (= 500000 (:context (get by-name "gpt-6.2-sol"))))
+                     (expect (= 272000 (:context astra)))
+                     (expect (= :frontier (:intelligence astra)))
+                     (expect (:reasoning? astra))
+                     (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                                (:reasoning-options astra)))))))
+
 (defdescribe
   canonical-model-order-test
   (it "keeps every curated provider default list in canonical order"
@@ -2865,10 +2870,10 @@
                              (router/lookup-by-model-variants router/KNOWN_MODEL_METADATA model)))
                 model)))
   (it "keeps each vendor's models together, newest version first, vendors by their best model"
-      (expect (= ["claude-opus-5-5" "claude-opus-5" "claude-sonnet-5" "gpt-6.1-sol" "gpt-6-sol"
+      (expect (= ["claude-opus-5-5" "claude-opus-5" "claude-sonnet-5" "gpt-6.2-sol" "gpt-6.1-sol"
                   "kimi-k3" "glm-5.3" "glm-5.3-flash" "glm-4.7"]
                  (router/sort-models ["glm-4.7" "claude-opus-5" "glm-5.3-flash" "claude-sonnet-5"
-                                      "gpt-6-sol" "glm-5.3" "kimi-k3" "gpt-6.1-sol"
+                                      "gpt-6.1-sol" "glm-5.3" "kimi-k3" "gpt-6.2-sol"
                                       "claude-opus-5-5"]))))
   (it
     "separates a multi-vendor provider's vendors and ranks a newer version above an older flagship"
@@ -2975,14 +2980,14 @@
       (doseq [model ["glm-5.2" "z-ai/glm-5.2" "glm-5.1" "glm-5" "qwen3.7-max" "qwen3.6-flash"
                      "deepseek-v4-flash" "deepseek-v4-flash-0731" "kimi-k2.6" "grok-4.6"
                      "minimax-m2.7" "claude-opus-4-8" "claude-haiku-4-5" "claude-fable-5-1"
-                     "gpt-6-sol"]]
+                     "gpt-6-sol" "gpt-6.1-sol" "gpt-6-astra"]]
         (expect (router/outdated-model? :alibaba-token-plan model) model)))
   (it "keeps current versions and models without a family minimum"
       (doseq [model ["glm-5-turbo" "glm-5v-turbo" "glm-5.3" "glm-5.3-flash" "kimi-k3" "qwen3.6-plus"
                      "qwen3.8-27b" "qwen4-max-preview" "grok-4.20-multi-agent" "grok-code-fast-1"
                      "minimax-m3" "mimo-v2.6-pro" "xiaomi/mimo-v2.6-flash" "mimo-v3-pro"
-                     "deepseek-v4-pro-0813" "gpt-5.3-codex" "gpt-6.1-sol" "gpt-oss-120b"
-                     "deepseek-v4-pro"]]
+                     "deepseek-v4-pro-0813" "gpt-5.3-codex" "gpt-6.2-sol" "gpt-6.2-astra"
+                     "gpt-oss-120b" "deepseek-v4-pro"]]
         (expect (not (router/outdated-model? :openrouter model)) model)))
   (it "leaves out dated Claude snapshots"
       (expect (router/outdated-model? :anthropic-coding-plan "claude-haiku-4-5-20251001"))
@@ -3009,7 +3014,7 @@
   (it "leaves outdated models out of provider model lists"
       (expect (not (router/provider-model-visible? :zai-coding-plan "glm-4.7")))
       (expect (not (router/provider-model-visible? :openai "gpt-4o")))
-      (expect (router/provider-model-visible? :openai "gpt-6.1-sol"))))
+      (expect (router/provider-model-visible? :openai "gpt-6.2-sol"))))
 
 (defdescribe chat-model-test
              ;; The Vis model pickers offered image and video models such as wan2.7-image, which cannot

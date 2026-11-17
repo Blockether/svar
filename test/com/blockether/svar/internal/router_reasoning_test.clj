@@ -311,6 +311,7 @@
                                :wire-style :zai-effort
                                :extra-body {:thinking {:type "enabled"} :reasoning_effort "low"}}
                               (router/resolve-reasoning-effort :anthropic glm53 "low"))))))
+
 (defdescribe
   provider-native-reasoning-effort-options-test
   "A caller may pin every rung that the model's catalog row advertises."
@@ -541,19 +542,20 @@
                       :reasoning_options
                       [{:type "effort" :values ["high" "max"] :min 1 :max 2 :ignored true}]}))))))
 
-(defdescribe
-  provider-model-filter-test
-  "Provider-scoped model filters."
-  (it "filters OpenAI Codex GPT models below GPT-5.3"
-      (let [provider (router/normalize-provider
-                       0
-                       {:id :openai-codex
-                        :api-key "test"
-                        :models [{:name "gpt-5"} {:name "gpt-5.1"} {:name "gpt-5.1-codex"}
-                                 {:name "gpt-5.3-codex"} {:name "gpt-5.4"} {:name "gpt-5.5"}]})]
-        (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"] (mapv :name (:models provider))))
-        (expect (router/provider-model-visible? :openai-codex "gpt-5.3-codex"))
-        (expect (not (router/provider-model-visible? :openai-codex "gpt-5.1-codex"))))))
+(defdescribe provider-model-filter-test
+             "Provider-scoped model filters."
+             (it "filters OpenAI Codex GPT models below GPT-6.2"
+                 (let [provider (router/normalize-provider 0
+                                                           {:id :openai-codex
+                                                            :api-key "test"
+                                                            :models [{:name "gpt-5"}
+                                                                     {:name "gpt-5.1-codex"}
+                                                                     {:name "gpt-6.2-sol"}]})]
+                   (expect (= ["gpt-6.2-sol"] (mapv :name (:models provider))))
+                   (doseq [model ["gpt-6.2-sol" "gpt-6.2-astra"]]
+                     (expect (router/provider-model-visible? :openai-codex model) model))
+                   (doseq [model ["gpt-5.3-codex" "gpt-6-luna" "gpt-6.1-sol" "gpt-6.1-terra"]]
+                     (expect (not (router/provider-model-visible? :openai-codex model)) model)))))
 
 (defdescribe
   anthropic-thinking-max-tokens-clamp-test
@@ -582,6 +584,7 @@
                     :max_tokens 50000
                     :thinking {:type "enabled" :budget_tokens 24000}}]
           (expect (= body (clamp body)))))))
+
 (defdescribe
   reasoning-off-test
   "`:off`: thinking disabled where the wire has a switch, least thinking where it has none."
