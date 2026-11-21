@@ -4062,32 +4062,36 @@
   "Awaits one WebSocket future, polling the caller hook when bound, and cancels
    the future whenever waiting ends exceptionally. `.get` wraps an operation
    failure in ExecutionException, so its cause is rethrown for reconnect
-   classification."
-  [^CompletableFuture future timeout-ms]
-  (let [cancel-fn *cancel-fn*]
-    (try
-      (loop [remaining (long timeout-ms)]
-        (when (caller-cancel-requested? cancel-fn)
-          (throw (ex-info "Responses WebSocket operation cancelled by caller."
-                          {:type :svar.core/stream-cancelled :stream? true :transport :websocket})))
-        (let [slice
-              (if cancel-fn (max 1 (min (long remaining) (long watchdog-tick-ms))) (long remaining))
-              outcome (try {:value (.get future slice TimeUnit/MILLISECONDS)}
-                           (catch TimeoutException e {:timeout e}))]
+   classification. `check!`, when given, runs before every 50ms slice of the
+   wait and ends it by throwing."
+  ([future timeout-ms] (await-websocket-future! future timeout-ms nil))
+  ([^CompletableFuture future timeout-ms check!]
+   (let [cancel-fn *cancel-fn*]
+     (try (loop [remaining (long timeout-ms)]
+            (when (caller-cancel-requested? cancel-fn)
+              (throw (ex-info
+                       "Responses WebSocket operation cancelled by caller."
+                       {:type :svar.core/stream-cancelled :stream? true :transport :websocket})))
+            (when check! (check!))
+            (let [slice (if (or cancel-fn check!)
+                          (max 1 (min (long remaining) (long watchdog-tick-ms)))
+                          (long remaining))
+                  outcome (try {:value (.get future slice TimeUnit/MILLISECONDS)}
+                               (catch TimeoutException e {:timeout e}))]
 
-          (if (contains? outcome :value)
-            (:value outcome)
-            (if (> (long remaining) slice)
-              (recur (- (long remaining) slice))
-              (throw (:timeout outcome))))))
-      (catch InterruptedException e
-        (.cancel future true)
-        (.interrupt (Thread/currentThread))
-        (throw e))
-      (catch java.util.concurrent.ExecutionException e
-        (.cancel future true)
-        (throw (or (ex-cause e) e)))
-      (catch Throwable e (.cancel future true) (throw e)))))
+              (if (contains? outcome :value)
+                (:value outcome)
+                (if (> (long remaining) slice)
+                  (recur (- (long remaining) slice))
+                  (throw (:timeout outcome))))))
+          (catch InterruptedException e
+            (.cancel future true)
+            (.interrupt (Thread/currentThread))
+            (throw e))
+          (catch java.util.concurrent.ExecutionException e
+            (.cancel future true)
+            (throw (or (ex-cause e) e)))
+          (catch Throwable e (.cancel future true) (throw e))))))
 
 (defn- abort-websocket! [^WebSocket socket] (try (.abort socket) (catch Throwable _ nil)))
 
@@ -4124,6 +4128,29 @@
             :cause-class (.getName (class cause))
             :url url}
            cause))
+
+(defn- websocket-peer-close-error
+  "Types a peer close frame as `:svar.session/transport-closed`, with its status
+   and reason, so a 1009 reaches the size fallback wherever the frame is seen."
+  ([close message] (websocket-peer-close-error close message nil))
+  ([close message cause]
+   (ex-info
+     message
+     (cond-> {:type :svar.session/transport-closed :close close :close-status (:status close)}
+       (not (str/blank? (:reason close)))
+       (assoc :close-reason (:reason close)))
+     cause)))
+
+(defn- throw-pending-peer-close!
+  "Throws the peer close frame that waits in `inbox`, if any. The JDK reads while
+   a write is pending, and the server can reject an oversized request after its
+   first frame header and stop reading: the close is then the real outcome of the
+   send, not the stalled write or the IOException that follows it."
+  [^LinkedBlockingQueue inbox cause]
+  (when-some [close (some #(when (and (map? %) (:svar.websocket/closed %)) %) inbox)]
+    (throw (websocket-peer-close-error close
+                                       "Responses WebSocket closed while the request was sent."
+                                       cause))))
 
 (defn open-responses-websocket!
   "Opens one Responses WebSocket and returns the small transport map used by
@@ -4198,8 +4225,10 @@
         (atom false)]
 
     {:send! (fn [payload]
-              (await-websocket-future! (.sendText ^WebSocket socket ^CharSequence payload true)
-                                       operation-timeout-ms))
+              (try (await-websocket-future! (.sendText ^WebSocket socket ^CharSequence payload true)
+                                            operation-timeout-ms
+                                            #(throw-pending-peer-close! inbox nil))
+                   (catch java.io.IOException e (throw-pending-peer-close! inbox e) (throw e))))
      ;; nil = nothing arrived within `wait-ms`. The reader polls in 50 ms slices
      ;; so Stop can interrupt a quiet socket, and this used to THROW a
      ;; TimeoutException per empty slice: twenty-odd stack-trace fills a second
@@ -4988,15 +5017,16 @@
         (cond
           (instance? Throwable raw) (throw raw)
           (:svar.websocket/closed raw)
-          (let [close-data (cond-> {:close-status (:status raw)}
-                             (not (str/blank? (:reason raw)))
-                             (assoc :close-reason (:reason raw)))]
+          (let [error (websocket-peer-close-error
+                        raw
+                        "Responses WebSocket closed before a terminal response.")]
             (trove/log! {:level :warn
                          :id ::websocket-closed-before-terminal
-                         :data (log-data (merge {:url url :transport :websocket} close-data))
+                         :data (log-data (merge {:url url :transport :websocket}
+                                                (select-keys (ex-data error)
+                                                             [:close-status :close-reason])))
                          :msg "Responses WebSocket closed before terminal response"})
-            (throw (ex-info "Responses WebSocket closed before a terminal response."
-                            (merge {:type :svar.session/transport-closed :close raw} close-data))))
+            (throw error))
           :else
           (let [event (enrich-responses-reasoning-event current-reasoning-item (json/read-json raw))
                 event-type (get event "type")

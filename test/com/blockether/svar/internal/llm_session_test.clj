@@ -129,6 +129,45 @@
                       :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}
                                {:name "gpt-5.6-terra" :context 100000 :input 1.0 :output 1.0}]}]))
 
+(defn- websocket-size-reject-server
+  "Loopback WebSocket peer that completes the upgrade, reads only the start of the
+   first frame and answers close 1009. `:close` then drops the connection; `:stall`
+   keeps it open without reading until `:release` is delivered."
+  [mode]
+  (let [server
+        (java.net.ServerSocket. 0 1 (java.net.InetAddress/getLoopbackAddress))
+
+        release
+        (promise)]
+
+    (future
+      (try (with-open [conn (.accept server)]
+             (let [in (.getInputStream conn)
+                   out (.getOutputStream conn)
+                   head (loop [text ""]
+                          (if (str/ends-with? text "\r\n\r\n")
+                            text
+                            (recur (str text (char (.read in))))))
+                   accept (.encodeToString
+                            (java.util.Base64/getEncoder)
+                            (.digest (java.security.MessageDigest/getInstance "SHA-1")
+                                     (.getBytes
+                                       (str (second (re-find #"(?i)Sec-WebSocket-Key: (\S+)" head))
+                                            "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))))]
+
+               (.write out
+                       (.getBytes (str "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                                       "Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                                       accept
+                                       "\r\n\r\n")))
+               (.flush out)
+               (.readNBytes in 14)
+               (.write out (byte-array [(unchecked-byte 0x88) 2 3 (unchecked-byte 0xF1)]))
+               (.flush out)
+               (when (= mode :stall) (deref release 30000 nil))))
+           (catch Throwable _ nil)))
+    {:server server :release release}))
+
 (defn- open-test-session
   [router opts]
   (svar/open-session router (assoc opts :websocket-prewarm? false)))
@@ -845,6 +884,29 @@
         (expect (instance? TimeoutException (ex-cause outcome)))
         (expect (< elapsed-ms 5000))
         (expect (not (identical? before (current-http-client))))))
+  (it "surfaces a size close that arrives while the request upload is pending or failing"
+      ;; Regression: the server can answer an oversized request with close 1009 after
+      ;; the first frame header and stop reading. The write then waited for the whole
+      ;; operation timeout, or failed as a bare IOException that the session answered
+      ;; with a reconnect ladder instead of the size fallback to HTTP.
+      (doseq [mode [:stall :close]]
+        (let [{:keys [^java.net.ServerSocket server release]} (websocket-size-reject-server mode)
+              payload (.repeat "x" (* 32 1024 1024))
+              socket (sut/open-responses-websocket! {:base-url (str "http://127.0.0.1:"
+                                                                    (.getLocalPort server))
+                                                     :responses-path "/codex/responses"
+                                                     :api-key "test-key"
+                                                     :timeout-ms 5000})
+              started (System/nanoTime)
+              outcome (try ((:send! socket) payload) nil (catch Throwable e e))
+              elapsed-ms (/ (- (System/nanoTime) started) 1e6)]
+
+          (deliver release true)
+          ((:abort! socket))
+          (.close server)
+          (expect (= :svar.session/transport-closed (:type (ex-data outcome))))
+          (expect (= 1009 (:close-status (ex-data outcome))))
+          (expect (< elapsed-ms 2000)))))
   (it
     "reconnects once after a handshake timeout, then keeps the session on HTTP"
     (let [opens
