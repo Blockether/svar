@@ -141,10 +141,13 @@
   "The peer closed the connection during the TLS handshake: the JDK
    `SSLHandshakeException` texts `Remote host terminated the handshake` and
    `Remote host closed connection during handshake`. The request was not sent yet.
+   `Received fatal alert: protocol_version` is the same case: a host that completed
+   other handshakes with this client answered one with that alert.
    `anomaly/fault!` drops the cause, so the text is the only evidence after a wrap.
    A certificate failure (`PKIX path building failed`, `certificate_unknown`) does
    not match: an unchanged retry fails the same way."
-  "remote host (?:terminated the|closed connection during) handshake")
+  (str "remote host (?:terminated the|closed connection during) handshake"
+       "|received fatal alert: protocol_version"))
 
 (def ^:private TLS_HANDSHAKE_DROP_RE (re-pattern TLS_HANDSHAKE_DROP_PATTERN))
 

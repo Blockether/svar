@@ -704,6 +704,11 @@
                                          "Remote host terminated the handshake"))
                  (err "Remote host terminated the handshake" {:type :svar.core/http-error})
                  (err "Remote host closed connection during handshake"
+                      {:type :svar.core/http-error})
+                 ;; A healthy host answered one handshake with this alert; the next call worked.
+                 (javax.net.ssl.SSLHandshakeException.
+                   "(protocol_version) Received fatal alert: protocol_version")
+                 (err "(protocol_version) Received fatal alert: protocol_version"
                       {:type :svar.core/http-error})]]
         (expect (= :transport-drop (:category (sut/classify e))))
         (expect (false? (:reached-model? (sut/classify e))))
