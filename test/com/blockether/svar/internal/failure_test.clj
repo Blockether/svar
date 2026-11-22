@@ -70,6 +70,20 @@
                     (expect (= :auth (:category c)) msg)
                     (expect (false? (:retryable? c)) msg)
                     (expect (false? (sut/transient-error? e)) msg))))
+            (it "keeps a 5xx that names authentication transient: the server judged no credentials"
+                (let [e
+                      (err "Exceptional status code: 503"
+                           {:type :svar.core/http-error
+                            :status 503
+                            :body (str "{\"type\":\"error\",\"error\":{\"type\":\"api_error\","
+                                       "\"message\":\"Authentication service is unavailable\"}}")})
+
+                      c
+                      (sut/classify e)]
+
+                  (expect (= :gateway-unavailable (:category c)))
+                  (expect (true? (:retryable? c)))
+                  (expect (sut/transient-error? e))))
             (it "lets hard auth veto a transport-looking retry message"
                 (let [e (err "Token expired; stream connection closed"
                              {:type :svar.core/http-error :status 429 :stream? true})]

@@ -243,9 +243,17 @@
 
 (defn auth-error?
   "True when provider text identifies unusable credentials, including expiry.
-   These are hard failures regardless of an incorrect transient HTTP status."
-  [hay]
-  (any-substring? hay AUTH_PATTERNS))
+   These are hard failures regardless of an incorrect transient HTTP status.
+   With a `status`, a 5xx is never one: a server that failed judged no
+   credentials, and its body can name its own authentication service."
+  ([hay] (any-substring? hay AUTH_PATTERNS))
+  ([status hay]
+   (and (not (<= 500
+                 (or (some-> status
+                             long)
+                     0)
+                 599))
+        (auth-error? hay))))
 
 ;; =============================================================================
 ;; Exception → evidence
@@ -770,10 +778,10 @@
                      false true
                      "the account's quota/billing limit is exhausted"
                      "top up or switch to another provider — retrying cannot help")
-      (auth-error? hay) (answer :auth
-                                false false
-                                "the provider rejected the credentials"
-                                "check the API key/token for this provider")
+      (auth-error? status hay) (answer :auth
+                                       false false
+                                       "the provider rejected the credentials"
+                                       "check the API key/token for this provider")
       (contains? #{401 403}
                  (some-> status
                          long))
@@ -1341,7 +1349,7 @@
        (and
          ;; Credential expiry, subscription/quota/billing exhaustion, and a
          ;; provider-declared output cap are deterministic for an unchanged request.
-         (not (auth-error? hay))
+         (not (auth-error? status hay))
          (not (provider-limit-failure? status hay))
          (not (output-budget-exhausted? data))
          (or (and (contains? STREAM_WATCHDOG_ERROR_TYPES etype)
