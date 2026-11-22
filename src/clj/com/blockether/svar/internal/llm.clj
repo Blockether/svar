@@ -3089,6 +3089,17 @@
   (when-let [[_ major minor] (re-find #"(?i)(?:^|/)gpt-(\d+)\.(\d+)(?:$|[-.])" (str model))]
     (not (neg? (compare [(parse-long major) (parse-long minor)] [5 6])))))
 
+(defn- gpt-6-2-or-later?
+  "True for OpenAI GPT model names from GPT-6.2 on, whose Responses API appends top-level
+   `instructions` after the input. Provider-qualified names are accepted."
+  [model]
+  (when-let [[_ major minor] (re-find #"(?i)(?:^|/)gpt-(\d+)(?:\.(\d+))?(?:$|[-.])" (str model))]
+    (not (neg? (compare [(parse-long major)
+                         (or (some-> minor
+                                     parse-long)
+                             0)]
+                        [6 2])))))
+
 (defn- responses-explicit-cache-endpoint?
   "True when a Responses endpoint accepts explicit `prompt_cache_breakpoint`
    markers. The ChatGPT Codex backend does NOT: it answers HTTP 400
@@ -3350,9 +3361,12 @@
   "Keep the first system message for Responses `instructions` and turn each later system
    message into a `developer` input message in place, as Codex sends only its base
    instructions. The ChatGPT backend reuses no prompt cache when `instructions` differ, so
-   a system block that names one session must not join them."
-  [messages]
-  (let [i (first (keep-indexed #(when (= "system" (:role %2)) %1) messages))]
+   a system block that names one session must not join them. From GPT-6.2 the API appends
+   `instructions` after the input, where no cached prefix can reach them, so every system
+   message becomes a `developer` input message and the first one leads the input."
+  [messages model]
+  (let [i (when-not (gpt-6-2-or-later? model)
+            (first (keep-indexed #(when (= "system" (:role %2)) %1) messages)))]
     (into []
           (map-indexed (fn [j m]
                          (cond-> m
@@ -3364,7 +3378,7 @@
   ([messages model extra-body] (build-openai-responses-request-body messages model extra-body nil))
   ([messages model extra-body {:keys [stateless-items? explicit-cache?] :or {explicit-cache? true}}]
    (let [messages
-         (responses-message-roles (sanitize-replayed-messages messages model true))
+         (responses-message-roles (sanitize-replayed-messages messages model true) model)
 
          ;; A breakpoint is a property of the ENDPOINT as much as of the model,
          ;; so the caller can switch the markers off for a backend that refuses
@@ -10745,7 +10759,7 @@
    come from the whole history, so the delta keeps the `instructions` split of that body."
   [messages n model explicit-cache?]
   (let [messages
-        (-> (vec (take-last n (responses-message-roles messages)))
+        (-> (vec (take-last n (responses-message-roles messages model)))
             (sanitize-replayed-messages model true))
 
         explicit-cache?

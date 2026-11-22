@@ -324,6 +324,33 @@
                      (expect (= (take-last 2 (:input body)) delta))
                      (expect (= ["developer" "user"] (roles delta)))))))
 
+(defdescribe responses-instructions-after-input-test
+             ;; GPT-6.2 appends top-level `instructions` after the input, so they never join a cached
+             ;; prefix. Live on Codex gpt-6.2-sol, a 17.5K-token prompt in `instructions` cached 0 tokens
+             ;; on each turn; the same prompt as the first developer input item cached 98% from turn 2.
+             (let [messages
+                   [{:role "system" :content "base"} {:role "system" :content "session 1"}
+                    {:role "user" :content "task"} {:role "assistant" :content "ok"}
+                    {:role "system" :content "session 2"} {:role "user" :content "next"}]
+
+                   roles
+                   #(mapv :role %)]
+
+               (doseq [model ["gpt-6.2-sol" "openai-codex/gpt-6.2-astra" "gpt-6.3" "gpt-7"]]
+                 (let [body (build-responses messages model {} {:explicit-cache? false})]
+                   (it (str model " sends no top-level instructions")
+                       (expect (not (contains? body :instructions))))
+                   (it (str model " sends the first system message as the first developer input")
+                       (expect (= ["developer" "developer" "user" "assistant" "developer" "user"]
+                                  (roles (:input body))))
+                       (expect (= "base" (get-in body [:input 0 :content 0 :text]))))
+                   (it (str model " gives a session delta the same roles as the full request body")
+                       (expect (= (take-last 2 (:input body))
+                                  (@#'sut/messages->responses-input messages 2 model false))))))
+               (it "keeps instructions for GPT-6.1"
+                   (expect (= "base"
+                              (:instructions (build-responses messages "gpt-6.1-sol" {})))))))
+
 ;; Regression, issue #152: after a mid-turn fallback from an OpenAI Responses
 ;; provider to a chat/completions one, the replayed composite `call_id|item_id`
 ;; was serialized VERBATIM — a 93-char id carrying an illegal `|` in both
