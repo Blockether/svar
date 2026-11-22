@@ -215,3 +215,82 @@
                (expect (identical? error caught))
                (expect (.isInterrupted (Thread/currentThread))))
              (finally (Thread/interrupted))))))
+
+(defn- host-stop-outcome
+  "What a held stream throws when a host stops it as Vis does: the cancel flag
+   first, then the interrupt of the caller, before a watchdog tick reads the flag."
+  [headers-first?]
+  (let [server
+        (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)
+
+        executor
+        (Executors/newCachedThreadPool)
+
+        release
+        (promise)
+
+        arrived
+        (promise)
+
+        cancel?
+        (atom false)]
+
+    (.createContext
+      server
+      "/stream"
+      (reify
+        HttpHandler
+          (handle [_ exchange]
+            (let [^HttpExchange exchange exchange]
+              (try (.readAllBytes (.getRequestBody exchange))
+                   (when headers-first?
+                     (.set (.getResponseHeaders exchange) "content-type" "text/event-stream")
+                     (.sendResponseHeaders exchange 200 0)
+                     (doto (.getResponseBody exchange)
+                       (.write (.getBytes "data: {\"text\":\"partial\"}\n\n" "UTF-8"))
+                       (.flush)))
+                   (deliver arrived true)
+                   (deref release 5000 nil)
+                   (finally (.close exchange)))))))
+    (.setExecutor server executor)
+    (.start server)
+    (try (let [url
+               (str "http://127.0.0.1:" (.getPort (.getAddress server)) "/stream")
+
+               caller
+               (Thread/currentThread)
+
+               stopper
+               (future (deref arrived 5000 nil)
+                       (Thread/sleep 150)
+                       (reset! cancel? true)
+                       (.interrupt caller))]
+
+           (try (binding [sut/*cancel-fn* #(deref cancel?)]
+                  (@#'sut/http-post-stream!
+                   url
+                   {:stream true}
+                   {"content-type" "application/json"}
+                   5000
+                   4000
+                   4000
+                   (fn [chunk]
+                     {:content-delta (get chunk "text")})
+                   (fn [_])))
+                nil
+                (catch Throwable e e)
+                (finally (deref stopper 5000 nil))))
+         (finally (Thread/interrupted)
+                  (deliver release true)
+                  (.stop server 0)
+                  (.shutdownNow executor)
+                  (.awaitTermination executor 5 TimeUnit/SECONDS)))))
+
+(defdescribe
+  host-stop-test
+  ;; A host that interrupts its worker with the stop got `Stream connection error:
+  ;; java.lang.InterruptedException`, or a bare interrupt: a provider failure in the logs.
+  (it "names a stop before the response headers a cancel"
+      (expect (= :svar.core/stream-cancelled (:type (ex-data (host-stop-outcome false))))))
+  (it "names a stop in the response body a cancel"
+      (expect (= :svar.core/stream-cancelled (:type (ex-data (host-stop-outcome true)))))))

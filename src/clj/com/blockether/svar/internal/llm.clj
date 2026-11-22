@@ -2484,7 +2484,9 @@
                :else (let [err (:error result)]
                        ;; Delegation is not a refusal: the router immediately owns
                        ;; this failure and emits the one canonical retry event.
-                       (when-not (= :router-owned-transient (:declined result))
+                       ;; Nor is the caller's own stop a provider failure.
+                       (when-not (or (= :router-owned-transient (:declined result))
+                                     (= :svar.core/stream-cancelled (:type (ex-data err))))
                          (log-retry-declined! {:attempt attempt
                                                :declined (:declined result)
                                                :classification (:classification result)
@@ -6544,7 +6546,7 @@
    and re-send it (doubling the effective stall). A genuinely external interrupt
    is propagated verbatim with the thread's interrupt flag restored.
 
-   `cancel-fired?`/`ttft-fired?` are the watchdog atoms. Always throws."
+   `cancel-fired?`/`ttft-fired?` are derefs of the two verdicts. Always throws."
   [^InterruptedException e cancel-fired? ttft-fired? url ttft-timeout-ms]
   (cond @cancel-fired? (do (Thread/interrupted)
                            (throw (ex-info
@@ -6638,6 +6640,13 @@
                                   cancel-fired?
                                   cancel-alive?))
 
+        ;; A host can interrupt this thread with its stop, before the next
+        ;; watchdog tick reads the request. So a failure asks the caller too:
+        ;; an interrupt that the caller asked for is a cancel, not a connection error.
+        cancelled?
+        (fn []
+          (or @cancel-fired? (cancel-requested?)))
+
         response
         (try
           (try
@@ -6661,7 +6670,7 @@
               ;; surface as ExceptionInfo wrapping IOException.
               ;; Reclassify before propagating; otherwise convert
               ;; InputStream body to string and re-throw as today.
-              (when @cancel-fired?
+              (when (cancelled?)
                 (Thread/interrupted)
                 (throw (ex-info "Stream cancelled by caller (pre-headers)."
                                 {:type :svar.core/stream-cancelled :stream? true :url url}
@@ -6700,7 +6709,7 @@
             (catch java.io.IOException e
               ;; Same reclassification for raw IOExceptions (the
               ;; JDK may surface InterruptedIOException here).
-              (when @cancel-fired?
+              (when (cancelled?)
                 (Thread/interrupted)
                 (throw (ex-info "Stream cancelled by caller (pre-headers)."
                                 {:type :svar.core/stream-cancelled :stream? true :url url}
@@ -6732,7 +6741,11 @@
               ;; effective stall. Reclassify OUR OWN watchdog fires into
               ;; the same typed errors as the wrapped paths; propagate a
               ;; genuinely external interrupt verbatim (flag restored).
-              (reclassify-pre-headers-interrupt! e cancel-fired? ttft-fired? url ttft-timeout-ms))
+              (reclassify-pre-headers-interrupt! e
+                                                 (delay (cancelled?))
+                                                 ttft-fired?
+                                                 url
+                                                 ttft-timeout-ms))
             (finally
               ;; Order matters: flip the flag BEFORE deregistering so
               ;; a racing tick sees the success and never fires. Then
@@ -7351,7 +7364,7 @@
       (catch clojure.lang.ExceptionInfo e
         ;; Cancellation wins over idle/semantic reclassification — the
         ;; watchdog closed the stream / interrupted us on purpose.
-        (when @cancel-fired?
+        (when (cancelled?)
           (Thread/interrupted)
           (throw (ex-info "Stream cancelled by caller."
                           {:type :svar.core/stream-cancelled :stream? true :url url}
@@ -7404,7 +7417,7 @@
       (catch Exception e
         ;; A watchdog-closed stream surfaces here as a plain IOException —
         ;; reclassify as cancellation before the idle/connection branches.
-        (when @cancel-fired?
+        (when (cancelled?)
           (Thread/interrupted)
           (throw (ex-info "Stream cancelled by caller."
                           {:type :svar.core/stream-cancelled :stream? true :url url}
