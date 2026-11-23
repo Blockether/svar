@@ -30,7 +30,7 @@
                         [:zai :zai-coding :zai-coding-plan]
 
                         name
-                        ["glm-5.1" "glm-5.2" "glm-5.3" "glm-5.3-flash" "glm-5.3-flashx"
+                        ["glm-5.1" "glm-5.2" "glm-5.3" "glm-5.4" "glm-5.3-flash" "glm-5.3-flashx"
                          "glm-5-turbo" "glm-5v-turbo"]]
 
                   (let [m (router/provider-model-entry pid name)]

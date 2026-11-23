@@ -68,7 +68,12 @@
                 ;; GLM table so we don't duplicate the entries.
                 :pricing-source :zai
                 :provider-model-source :zai
-                :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
+                :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
+                ;; GLM-5.4 is live only on the Coding Plan: the Model API opens after z.ai's
+                ;; security assessment, so retail `:zai` does not offer it yet.
+                :default-models [{:name "glm-5.3-flash"} {:name "glm-5.4"} {:name "glm-5.3"}
+                                 {:name "glm-5.3-flashx"} {:name "glm-5-turbo"}
+                                 {:name "glm-5v-turbo"}]}
    ;; Z.ai Coding Plan runtime alias. Vis registers this as
    ;; `:zai-coding-plan` (see `vis-provider-zai`); without the alias the
    ;; catalog miss reproduces the same `max_tokens = 2048` bug observed
@@ -86,7 +91,9 @@
                      ;; well — the plan opens it by application order, which is an account
                      ;; entitlement rather than a catalog fact — but never ahead of Flash.
                      :lead-models ["glm-5.3-flash"]
-                     :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"}
+                     ;; GLM-5.4 is live only on the Coding Plan: the Model API opens after z.ai's
+                     ;; security assessment, so retail `:zai` does not offer it yet.
+                     :default-models [{:name "glm-5.3-flash"} {:name "glm-5.4"} {:name "glm-5.3"}
                                       {:name "glm-5.3-flashx"} {:name "glm-5-turbo"}
                                       {:name "glm-5v-turbo"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
@@ -465,6 +472,12 @@
    "glm-5.2" {:intelligence :high
               :speed :medium
               :capabilities #{:chat}
+              :reasoning? true
+              :reasoning-style :zai-effort}
+   ;; GLM-5.4 is z.ai's multimodal flagship: image, video and file input.
+   "glm-5.4" {:intelligence :high
+              :speed :medium
+              :capabilities #{:chat :vision}
               :reasoning? true
               :reasoning-style :zai-effort}
    "glm-5.3" {:intelligence :high
@@ -1409,6 +1422,17 @@
     ;; what the plan meters overage at, and what the catalog quotes for glm-5.3
     ;; on the gateways that already list it. The effort rungs are the catalog's
     ;; own: unlike glm-5.2, GLM-5.3 sells a "low".
+    ;; GLM-5.4 (2026-11-23) is on the Coding Plan only. models.dev lists it under
+    ;; `zai-coding-plan` / `zhipuai-coding-plan` with zero cost and no retail `zai`
+    ;; row, and z.ai publishes no API price yet. So this overlay is its only source.
+    ;; The rates mirror glm-5.3 retail until z.ai publishes the GLM-5.4 price. The
+    ;; catalog gives the 1M context, the 131072 output ceiling and the effort rungs.
+    "glm-5.4" {:pricing {:input 1.40 :cached-input 0.26 :output 4.40}
+               :context 1000000
+               :output-limit 32768
+               :output-ceiling 131072
+               :json-object-mode? true
+               :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
     "glm-5.3" {:pricing {:input 1.40 :cached-input 0.26 :output 4.40}
                :context 1000000
                :output-limit 32768

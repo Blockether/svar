@@ -413,8 +413,8 @@ bypasses abstract reasoning aliases, caps, and translations.
 `reasoning-effort-options` lists the rungs one model offers (normalized models
 also carry them as `:reasoning-effort-options`), and `nearest-reasoning-effort`
 maps a chosen rung to the closest rung that another model offers. GLM-5.2 sells
-`high`/`max`; GLM-5.3, GLM-5.3-Flash and GLM-5.3-FlashX add the light `low` rung.
-All four send `{:thinking {:type "enabled"} :reasoning_effort "<rung>"}`. Routed
+`high`/`max`; GLM-5.4, GLM-5.3, GLM-5.3-Flash and GLM-5.3-FlashX add the light
+`low` rung. All five send `{:thinking {:type "enabled"} :reasoning_effort "<rung>"}`. Routed
 results retain the actual resolution under `:routed/reasoning-effort`; callers
 can preflight with `resolve-reasoning-effort`, which returns `:requested`,
 `:effective`, `:supported`, `:wire-style`, and `:extra-body`.
