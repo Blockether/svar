@@ -84,7 +84,9 @@
    ;; will not fund a third-party request; repeating the same request cannot
    ;; change the account state.
    "third-party apps now draw" "draw from your extra usage" "draw from extra usage"
-   "payment required" "payment_required"])
+   "payment required" "payment_required"
+   ;; The ChatGPT Codex backend: the plan window is used up, or the plan has no Codex.
+   "usage_limit_reached" "usage_not_included"])
 
 (def ^:private GOOGLE_THROTTLE_REASON
   "Google `ErrorInfo` reason of a short throttle. Its message can say `Quota exceeded`
@@ -317,7 +319,7 @@
     (or (when (string? header-id) header-id)
         (second (re-find REQUEST_ID_PATTERN (str (:body data) " " (ex-message e)))))))
 
-(declare google-retry-delay-ms)
+(declare google-retry-delay-ms codex-reset-delay-ms anthropic-reset-delay-ms)
 
 (defn retry-after-ms
   "Server-declared cooldown from a `Retry-After` header, in ms, or nil.
@@ -338,7 +340,9 @@
           (try (let [secs (Long/parseLong (str/trim (str raw)))]
                  (when (nat-int? secs) (* 1000 secs)))
                (catch NumberFormatException _ nil)))
-        (google-retry-delay-ms e))))
+        (google-retry-delay-ms e)
+        (codex-reset-delay-ms e)
+        (anthropic-reset-delay-ms e))))
 
 (defn stream-output-started?
   "True when the provider already streamed visible content/reasoning before the
@@ -658,6 +662,51 @@
       (some #(when-let [ms (ratelimit/parse-duration-ms %)] (when (pos? (long ms)) ms))
             [(get (detail "google.rpc.RetryInfo") "retryDelay")
              (get-in (detail "google.rpc.ErrorInfo") ["metadata" "quotaResetDelay"])]))))
+
+(defn codex-reset-delay-ms
+  "Time until the ChatGPT Codex plan window resets, in ms, or nil: `error.resets_in_seconds`,
+   else `error.resets_at` (epoch seconds). Codex sends it with `usage_limit_reached`."
+  [^Throwable e]
+  (let [error
+        (get (parsed-error-body (:body (ex-data e))) "error")
+
+        in-seconds
+        (when (map? error) (get error "resets_in_seconds"))
+
+        at-seconds
+        (when (map? error) (get error "resets_at"))
+
+        ms
+        (cond (number? in-seconds) (long (* 1000 (double in-seconds)))
+              (number? at-seconds) (- (long (* 1000 (double at-seconds)))
+                                      (System/currentTimeMillis))
+              :else nil)]
+
+    (when (and ms (pos? (long ms))) ms)))
+
+(defn anthropic-reset-delay-ms
+  "Time until a used-up Anthropic subscription window resets, in ms, or nil. Only a
+   429 whose `anthropic-ratelimit-unified-status` is `rejected` counts: on other
+   responses the unified reset names the end of a window that still has room."
+  [^Throwable e]
+  (let [{:keys [status headers]}
+        (ex-data e)
+
+        unified
+        (get-in (ratelimit/parse :anthropic headers) [:windows :unified])
+
+        at
+        (:resets-at-ms unified)]
+
+    (when (and (= 429 status)
+               (= "rejected"
+                  (some-> (:status unified)
+                          str
+                          str/trim
+                          str/lower-case))
+               at)
+      (let [ms (- (long at) (System/currentTimeMillis))]
+        (when (pos? ms) ms)))))
 
 (defn content-filter
   "Content-filter evidence for failure `e`, or nil.

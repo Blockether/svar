@@ -18,7 +18,8 @@
    2. The catch-and-rethrow path on the non-stream completion attaches
       `:body` (truncated) to the rethrown `:svar.core/http-error`
       ex-data so callers can render it without scraping logs."
-  (:require [clojure.string :as str]
+  (:require [babashka.http-client :as http]
+            [clojure.string :as str]
             [lazytest.core :refer [defdescribe describe expect it throws?]]
             [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.llm :as sut]))
@@ -175,7 +176,26 @@
                     (catch clojure.lang.ExceptionInfo e (ex-data e)))))]
           (expect (= :svar.core/http-error (:type captured)))
           (expect (not (contains? captured :request)))
-          (expect (not (str/includes? (pr-str captured) "ya29.secret"))))))
+          (expect (not (str/includes? (pr-str captured) "ya29.secret")))))
+    (it "drops the sent request from an error that a direct POST raises"
+        (let [captured (with-redefs-fn {#'http/post (fn [& _]
+                                                      (throw (ex-info "Exceptional status code: 401"
+                                                                      {:status 401
+                                                                       :request
+                                                                       {:headers
+                                                                        {"Authorization"
+                                                                         "Bearer ya29.secret"}}})))}
+                         (fn []
+                           (try (@#'sut/cloud-code-post!
+                                 "https://cloudcode-pa.googleapis.com"
+                                 "fetchAvailableModels"
+                                 {}
+                                 "ya29.secret"
+                                 {}
+                                 1000)
+                                (catch clojure.lang.ExceptionInfo e (ex-data e)))))]
+          (expect (= 401 (:status captured)))
+          (expect (not (contains? captured :request))))))
   (describe
     "streaming chat-completion"
     (it "retries connection-closed stream failures before any emitted stream output"

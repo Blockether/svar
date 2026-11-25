@@ -791,3 +791,66 @@
                                                               "Too fast."
                                                               {:reset "4s" :retry "3.5s"})
                                                   {:fallback-ms 1000})))))
+
+;; ChatGPT Codex reports a used-up plan window as a 429 with its reset time in the body.
+(defdescribe
+  codex-usage-limit-test
+  (it "reports a used-up plan window as hard, with its reset time"
+      (let [before
+            (System/currentTimeMillis)
+
+            c
+            (sut/classify (err "HTTP 429"
+                               {:status 429
+                                :body (str
+                                        "{\"error\":{\"type\":\"usage_limit_reached\","
+                                        "\"message\":\"The usage limit has been reached\","
+                                        "\"plan_type\":\"plus\",\"resets_in_seconds\":5400}}")}))]
+
+        (expect (= :quota-exhausted (:category c)))
+        (expect (false? (:retryable? c)))
+        (expect (= 5400000 (:retry-after-ms c)))
+        (expect (<= (+ before 5400000) (:resets-at-ms c)))))
+  (it "reads the absolute reset time"
+      (let [at
+            (+ (quot (System/currentTimeMillis) 1000) 600)
+
+            c
+            (sut/classify (err "HTTP 429"
+                               {:status 429
+                                :body (str "{\"error\":{\"type\":\"usage_limit_reached\","
+                                           "\"resets_at\":"
+                                           at
+                                           "}}")}))]
+
+        (expect (< 540000 (:retry-after-ms c) 600001))))
+  (it "reports a plan without Codex as hard"
+      (expect (= :quota-exhausted
+                 (:category (sut/classify
+                              (err "HTTP 429"
+                                   {:status 429
+                                    :body "{\"error\":{\"type\":\"usage_not_included\"}}"})))))))
+
+;; Claude subscription: a used-up window answers 429 with the unified reset in headers.
+(defdescribe
+  anthropic-unified-reset-test
+  (let [at
+        (+ (quot (System/currentTimeMillis) 1000) 3600)
+
+        limited
+        (fn [unified-status]
+          (err "HTTP 429"
+               {:status 429
+                :headers {"anthropic-ratelimit-unified-status" unified-status
+                          "anthropic-ratelimit-unified-reset" (str at)}
+                :body
+                (str "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\","
+                     "\"message\":\"This request would exceed your account's rate limit.\"}}")}))]
+
+    (it "tells when a rejected window resets and does not sleep until then"
+        (let [c (sut/classify (limited "rejected"))]
+          (expect (< 3540000 (:retry-after-ms c) 3600001))
+          (expect (nil? (sut/retry-sleep-plan (limited "rejected")
+                                              {:fallback-ms 1000 :budget-ms 60000})))))
+    (it "ignores the unified reset of a window that still has room"
+        (expect (nil? (:retry-after-ms (sut/classify (limited "allowed"))))))))

@@ -224,6 +224,14 @@
                         (Thread. ^Runnable shutdown-http-client! "svar-http-shutdown-hook"))
       true))
 
+(defn- without-request
+  "`e` without `:request` in its ex-data. The HTTP client puts the sent request, with
+   its Authorization header, there, and an error must not carry a credential."
+  ^Throwable [^Throwable e]
+  (if (contains? (ex-data e) :request)
+    (ex-info (ex-message e) (dissoc (ex-data e) :request) (ex-cause e))
+    e))
+
 (defn- http-post!
   "Makes an HTTP POST request with JSON body. Reuses the shared HttpClient.
 
@@ -255,7 +263,9 @@
                                                   :body (json/write-json-str body)
                                                   :timeout timeout-ms})))
              (catch Exception e
-               (if (connection-error? e) (throw (connection-error->ex-info e url)) (throw e))))
+               (if (connection-error? e)
+                 (throw (connection-error->ex-info e url))
+                 (throw (without-request e)))))
 
         _
         (mark-connection-healthy! url)
@@ -6945,7 +6955,7 @@
                           (slurp-input-stream (:body ed)))]
 
                     (throw (ex-info (ex-message e)
-                                    (cond-> (dissoc ed :body)
+                                    (cond-> (dissoc ed :body :request)
                                       body-str
                                       (assoc :body body-str))
                                     (ex-cause e)))))))
