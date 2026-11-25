@@ -156,7 +156,26 @@
           (expect (= 400 (:status captured)))
           (expect (string? (:body captured)))
           (expect (str/includes? (:body captured) "Invalid `signature` in `thinking` block"))
-          (expect (str/includes? (:body captured) "request_id")))))
+          (expect (str/includes? (:body captured) "request_id"))))
+    (it "drops the sent request, with its bearer token, from the ex-data"
+        (let [captured
+              (with-redefs-fn {#'com.blockether.svar.internal.llm/http-post!
+                               (fn [_ _ _ _]
+                                 (throw (ex-info "Exceptional status code: 429"
+                                                 {:status 429
+                                                  :body "{}"
+                                                  :request {:headers {"Authorization"
+                                                                      "Bearer ya29.secret"}}})))}
+                (fn []
+                  (try
+                    (sut/chat-completion [{:role "user" :content "hi"}]
+                                         "gemini-3-flash" "ya29.secret"
+                                         "https://cloudcode-pa.googleapis.com"
+                                         {:api-style :cloud-code :timeout-ms 1000 :max-retries 1})
+                    (catch clojure.lang.ExceptionInfo e (ex-data e)))))]
+          (expect (= :svar.core/http-error (:type captured)))
+          (expect (not (contains? captured :request)))
+          (expect (not (str/includes? (pr-str captured) "ya29.secret"))))))
   (describe
     "streaming chat-completion"
     (it "retries connection-closed stream failures before any emitted stream output"

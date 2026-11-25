@@ -743,3 +743,51 @@
                  (:no-retry-reason (sut/low-level-retry-decision
                                      (err "Remote host terminated the handshake"
                                           {:type :svar.core/http-error :content-acc-len 12})))))))
+
+;; Google sends its cooldown in `error.details`, not in `Retry-After`.
+(defn- google-429
+  [reason message delays]
+  (err "HTTP 429"
+       {:status 429
+        :body (str "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\""
+                   message
+                   "\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\","
+                   "\"reason\":\""
+                   reason
+                   "\",\"metadata\":{\"quotaResetDelay\":\""
+                   (:reset delays)
+                   "\"}}"
+                   (when-let [retry (:retry delays)]
+                     (str ",{\"@type\":\"type.googleapis.com/google.rpc.RetryInfo\","
+                          "\"retryDelay\":\""
+                          retry
+                          "\"}"))
+                   "]}}")}))
+
+(defdescribe google-quota-test
+             (it "reports an exhausted quota as hard, with its reset time"
+                 (let [before
+                       (System/currentTimeMillis)
+
+                       c
+                       (sut/classify (google-429 "QUOTA_EXHAUSTED"
+                                                 "You have exhausted your capacity on this model."
+                                                 {:reset "2h5m30s"}))]
+
+                   (expect (= :quota-exhausted (:category c)))
+                   (expect (false? (:retryable? c)))
+                   (expect (= 7530000 (:retry-after-ms c)))
+                   (expect (<= (+ before 7530000) (:resets-at-ms c)))))
+             (it "keeps a per-minute throttle transient even when it says Quota exceeded"
+                 (let [c (sut/classify (google-429 "RATE_LIMIT_EXCEEDED"
+                                                   "Quota exceeded for quota metric per minute."
+                                                   {:reset "4s" :retry "3.5s"}))]
+                   (expect (not= :quota-exhausted (:category c)))
+                   (expect (true? (:retryable? c)))
+                   (expect (= 3500 (:retry-after-ms c)))))
+             (it "sleeps for the cooldown that the body declares"
+                 (expect (= {:delay-ms 3500 :retry-after-ms 3500}
+                            (sut/retry-sleep-plan (google-429 "RATE_LIMIT_EXCEEDED"
+                                                              "Too fast."
+                                                              {:reset "4s" :retry "3.5s"})
+                                                  {:fallback-ms 1000})))))

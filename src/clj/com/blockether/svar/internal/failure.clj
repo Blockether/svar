@@ -33,7 +33,8 @@
    All predicates are pure: they take an already-lower-cased haystack plus an
    optional status, or a Throwable, and return data. No IO, no sleeping."
   (:require [charred.api :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [com.blockether.svar.internal.ratelimit :as ratelimit]))
 
 ;; =============================================================================
 ;; Status codes
@@ -85,11 +86,18 @@
    "third-party apps now draw" "draw from your extra usage" "draw from extra usage"
    "payment required" "payment_required"])
 
+(def ^:private GOOGLE_THROTTLE_REASON
+  "Google `ErrorInfo` reason of a short throttle. Its message can say `Quota exceeded`
+   for a per-minute quota, so it is not an account state."
+  #"\"reason\"\s*:\s*\"rate_limit_exceeded\"")
+
 (defn provider-limit-error?
   "True when error text/body names a subscription/quota/billing exhaustion
    (account state) that must never be retried as a transient throttle."
   [hay]
-  (boolean (and hay (some #(str/includes? hay %) NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS))))
+  (boolean (and hay
+                (some #(str/includes? hay %) NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS)
+                (not (re-find GOOGLE_THROTTLE_REASON hay)))))
 
 (def PROVIDER_LIMIT_STATUS_CODES
   "HTTP statuses that ARE an account/billing wall on their own, whatever the
@@ -309,10 +317,13 @@
     (or (when (string? header-id) header-id)
         (second (re-find REQUEST_ID_PATTERN (str (:body data) " " (ex-message e)))))))
 
+(declare google-retry-delay-ms)
+
 (defn retry-after-ms
   "Server-declared cooldown from a `Retry-After` header, in ms, or nil.
    Only the delta-seconds form is honored; an HTTP-date form is ignored rather
-   than mis-parsed into a nonsense sleep."
+   than mis-parsed into a nonsense sleep. Without the header, a Google error
+   body can declare it (see [[google-retry-delay-ms]])."
   [^Throwable e]
   (let [headers
         (:headers (ex-data e))
@@ -323,10 +334,11 @@
                   (get headers k))
                 ["retry-after" "Retry-After" :retry-after :Retry-After]))]
 
-    (when raw
-      (try (let [secs (Long/parseLong (str/trim (str raw)))]
-             (when (nat-int? secs) (* 1000 secs)))
-           (catch NumberFormatException _ nil)))))
+    (or (when raw
+          (try (let [secs (Long/parseLong (str/trim (str raw)))]
+                 (when (nat-int? secs) (* 1000 secs)))
+               (catch NumberFormatException _ nil)))
+        (google-retry-delay-ms e))))
 
 (defn stream-output-started?
   "True when the provider already streamed visible content/reasoning before the
@@ -629,6 +641,24 @@
              (catch Exception _ nil))
         :else nil))
 
+(defn google-retry-delay-ms
+  "Cooldown that a Google error body declares, in ms, or nil: `RetryInfo.retryDelay`
+   (`\"3600s\"`), else `ErrorInfo.metadata.quotaResetDelay` (`\"2h5m30s\"`). The
+   Gemini API and Cloud Code send it in `error.details` instead of `Retry-After`."
+  [^Throwable e]
+  (let [details
+        (get-in (parsed-error-body (:body (ex-data e))) ["error" "details"])
+
+        detail
+        (fn [type-suffix]
+          (some #(when (and (map? %) (str/ends-with? (str (get % "@type")) type-suffix)) %)
+                details))]
+
+    (when (sequential? details)
+      (some #(when-let [ms (ratelimit/parse-duration-ms %)] (when (pos? (long ms)) ms))
+            [(get (detail "google.rpc.RetryInfo") "retryDelay")
+             (get-in (detail "google.rpc.ErrorInfo") ["metadata" "quotaResetDelay"])]))))
+
 (defn content-filter
   "Content-filter evidence for failure `e`, or nil.
 
@@ -736,8 +766,15 @@
                    (not= :unknown (first attempt-categories)))
           (first attempt-categories))
 
+        declared-ms
+        (retry-after-ms e)
+
         base
-        {:status status :request-id (request-id e) :error-type etype}
+        (cond-> {:status status :request-id (request-id e) :error-type etype}
+          declared-ms
+          (assoc :retry-after-ms
+            declared-ms :resets-at-ms
+            (+ (System/currentTimeMillis) (long declared-ms))))
 
         limit?
         (provider-limit-failure? status hay)

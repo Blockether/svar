@@ -71,7 +71,7 @@
 
 (def ^:private duration-unit-ms {"ms" 1 "s" 1000 "m" 60000 "h" 3600000 "d" 86400000})
 
-(defn- parse-duration-ms
+(defn parse-duration-ms
   "OpenAI reset: Go-style duration string → milliseconds.
    \"1s\" → 1000, \"6m0s\" → 360000, \"100ms\" → 100, \"1h30m\" → 5400000,
    \"1.5s\" → 1500. Returns nil on garbage."

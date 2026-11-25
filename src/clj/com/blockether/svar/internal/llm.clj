@@ -1169,6 +1169,12 @@
 
     (or direct cause from-data klass "HTTP request failed")))
 
+(defn- http-error-data
+  "ex-data of a failed HTTP call without `:body` and `:request`. The HTTP client puts
+   the sent request, with its Authorization header, in `:request`."
+  [ex-data-map]
+  (dissoc ex-data-map :body :request))
+
 (defn- truncate-error-body
   "Returns a short string suitable for `:body` / `:body-snippet` on
    `:svar.core/http-error` ex-data. Stringifies non-string bodies
@@ -3573,12 +3579,12 @@
 
 (defn- with-gemini-call-signature
   "Gemini 3 rejects a model turn whose first functionCall has no
-   thoughtSignature. A turn that kept no signature gets the documented skip value."
+   thoughtSignature. That call gets the documented skip value when it kept none."
   [parts]
   (let [idx (first (keep-indexed (fn [i p]
                                    (when (:functionCall p) i))
                                  parts))]
-    (if (and idx (not-any? :thoughtSignature parts))
+    (if (and idx (not (get-in parts [idx :thoughtSignature])))
       (assoc-in parts [idx :thoughtSignature] GEMINI_SKIP_SIGNATURE)
       parts)))
 
@@ -5845,7 +5851,7 @@
                                               (subs api-key 0 (min 8 (count api-key))))})
                            :msg "detected API key configuration failure"}))
             (anomaly/fault! error-message
-                            (cond-> (merge (dissoc ex-data-map :body)
+                            (cond-> (merge (http-error-data ex-data-map)
                                            {:type :svar.core/http-error :llm-request llm-request})
                               response-body
                               (assoc :body (truncate-error-body response-body))
@@ -5886,7 +5892,7 @@
                (http-error-message e)]
 
            (anomaly/fault! error-message
-                           (cond-> (merge (dissoc ex-data-map :body)
+                           (cond-> (merge (http-error-data ex-data-map)
                                           {:type :svar.core/http-error
                                            :llm-request {:model model :base-url base-url}})
                              response-body
@@ -6155,11 +6161,12 @@
                                           :api-key-prefix
                                           (when api-key (subs api-key 0 (min 8 (count api-key))))})
                          :msg "detected API key configuration failure"}))
-          (anomaly/fault!
-            error-message
-            (cond-> (merge (ex-data e) {:type :svar.core/http-error :llm-request sanitized-request})
-              api-key-error
-              (assoc :api-key-error api-key-error))))))))
+          (anomaly/fault! error-message
+                          (cond-> (merge (dissoc (ex-data e) :request)
+                                         {:type :svar.core/http-error
+                                          :llm-request sanitized-request})
+                            api-key-error
+                            (assoc :api-key-error api-key-error))))))))
 
 ;; =============================================================================
 ;; SSE Streaming

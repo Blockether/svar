@@ -943,6 +943,21 @@
                                "gemini-3-pro"
                                {})]
         (expect (= "skip_thought_signature_validator"
+                   (get-in body [:contents 1 :parts 1 :thoughtSignature])))))
+  (it "signs the first function call even when an earlier thought kept a signature"
+      (let [msg
+            (:assistant-message
+              (extract-gemini {:parsed {"candidates"
+                                        [{"content"
+                                          {"parts"
+                                           [{"text" "plan" "thought" true "thoughtSignature" "sig"}
+                                            {"functionCall" {"name" "cat" "args" {}}}]}}]}}))
+
+            body
+            (build-gemini [{:role "user" :content "go"} msg] "gemini-3-pro" {})]
+
+        (expect (= "sig" (get-in body [:contents 1 :parts 0 :thoughtSignature])))
+        (expect (= "skip_thought_signature_validator"
                    (get-in body [:contents 1 :parts 1 :thoughtSignature]))))))
 
 (defdescribe
