@@ -106,6 +106,18 @@
             :default-models [{:name "gemini-3.8-flash"} {:name "gemini-2.5-pro"}
                              {:name "gemini-2.5-flash"}]
             :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
+   ;; Google Antigravity: Gemini and Claude through Cloud Code Assist. The native
+   ;; Gemini body goes in the Cloud Code envelope (`:api-style :cloud-code`) with a
+   ;; Google OAuth Bearer token; the caller owns sign-in. Consumer accounts must use
+   ;; the daily host: another host can grant other entitlements.
+   :antigravity {:base-url "https://daily-cloudcode-pa.googleapis.com"
+                 :api-style :cloud-code
+                 :models-shape :cloud-code
+                 :live-model-limits? true
+                 :pricing-source :google
+                 :default-models [{:name "gemini-4-hydrogen-high"} {:name "gemini-3.8-flash-medium"}
+                                  {:name "claude-opus-4-6-thinking"}]
+                 :env-keys []}
    :openrouter {:base-url "https://openrouter.ai/api/v1" :env-keys ["OPENROUTER_API_KEY"]}
    ;; Mistral — OpenAI-compatible `/v1/chat/completions`. No `:api-style` needed
    ;; (default OpenAI chat wire). The `:mistral` slug already exists in the bundled
@@ -122,6 +134,7 @@
    {:base-url "https://api.individual.githubcopilot.com"
     :models-base :host
     :models-shape :github-copilot
+    :live-model-limits? true
     :default-models [{:name "claude-opus-5.5"} {:name "claude-sonnet-5.5"}
                      {:name "claude-haiku-5.5"} {:name "claude-fable-5.2"} {:name "gpt-6.2-sol"}
                      {:name "gpt-6.2-astra"} {:name "gpt-6-luna"} {:name "gpt-5.6-terra"}]

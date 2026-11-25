@@ -521,6 +521,11 @@
       :gemini
       base-url
 
+      ;; Cloud Code builds `{base}/v1internal:generateContent` in
+      ;; `cloud-code-completion`; root unchanged.
+      :cloud-code
+      base-url
+
       ;; :openai-compatible-chat default
       (if (str/ends-with? base-url "/chat/completions")
         base-url
@@ -3532,36 +3537,83 @@
         (string? (get part "text")) (get part "text")
         :else nil))
 
+(def ^:private GEMINI_SKIP_SIGNATURE
+  "Gemini's documented `thoughtSignature` for a function call that has no
+   signature of its own, for example history from another model."
+  "skip_thought_signature_validator")
+
+(defn- non-blank-string [s] (when (and (string? s) (not (str/blank? s))) s))
+
+(defn- canonical-block->gemini-part
+  "One non-thinking canonical block → one Gemini part, or nil."
+  [b id->name]
+  (case (:type b)
+    "text"
+    (when-not (str/blank? (:text b)) {:text (:text b)})
+
+    ;; The wire `id` pairs a call to its response; Claude on Cloud Code requires it.
+    "tool_use"
+    {:functionCall (cond-> {:name (:name b) :args (or (:input b) {})}
+                     (:id b)
+                     (assoc :id (:id b)))}
+
+    ;; Gemini's functionResponse `:response` is a STRUCTURED error
+    ;; channel: newer models (Gemini 3) require `{:output v}` for
+    ;; success and `{:error v}` for failures, and REJECT the legacy
+    ;; `{:result v}` shape. Key on the canonical `:is_error` flag.
+    "tool_result"
+    {:functionResponse (cond-> {:name (or (id->name (:tool_use_id b)) (:tool_use_id b))
+                                :response (if (:is_error b)
+                                            {:error (tool-result-text (:content b))}
+                                            {:output (tool-result-text (:content b))})}
+                         (:tool_use_id b)
+                         (assoc :id (:tool_use_id b)))}
+
+    (when (:text b) {:text (:text b)})))
+
+(defn- with-gemini-call-signature
+  "Gemini 3 rejects a model turn whose first functionCall has no
+   thoughtSignature. A turn that kept no signature gets the documented skip value."
+  [parts]
+  (let [idx (first (keep-indexed (fn [i p]
+                                   (when (:functionCall p) i))
+                                 parts))]
+    (if (and idx (not-any? :thoughtSignature parts))
+      (assoc-in parts [idx :thoughtSignature] GEMINI_SKIP_SIGNATURE)
+      parts)))
+
 (defn- canonical->gemini-parts
   "One canonical content vec → Gemini `parts`. `id->name` resolves a
-   tool_result's function name from the tool_use it answers."
+   tool_result's function name from the tool_use it answers.
+
+   Gemini signatures live in canonical thinking blocks (see
+   `gemini-part->canonical-blocks`): signed thought text replays as a
+   `thought` part, and a signed block with blank thinking puts its
+   `thoughtSignature` on the next part. Unsigned thinking is not replayed."
   [blocks id->name]
-  (->> blocks
-       (keep
-         (fn [b]
-           (case (:type b)
-             "text"
-             (when-not (str/blank? (:text b)) {:text (:text b)})
-
-             ;; Thinking is NOT replayed to Gemini — no signed-echo contract.
-             "thinking"
-             nil
-
-             "tool_use"
-             {:functionCall {:name (:name b) :args (or (:input b) {})}}
-
-             ;; Gemini's functionResponse `:response` is a STRUCTURED error
-             ;; channel: newer models (Gemini 3) require `{:output v}` for
-             ;; success and `{:error v}` for failures, and REJECT the legacy
-             ;; `{:result v}` shape. Key on the canonical `:is_error` flag.
-             "tool_result"
-             {:functionResponse {:name (or (id->name (:tool_use_id b)) (:tool_use_id b))
-                                 :response (if (:is_error b)
-                                             {:error (tool-result-text (:content b))}
-                                             {:output (tool-result-text (:content b))})}}
-
-             (when (:text b) {:text (:text b)}))))
-       vec))
+  (let [{:keys [parts pending]}
+        (reduce (fn [{:keys [parts pending] :as acc} b]
+                  (if (= "thinking" (:type b))
+                    (let [sig (non-blank-string (:thinking-signature b))]
+                      (cond (nil? sig) acc
+                            (str/blank? (:thinking b)) (assoc acc :pending sig)
+                            :else (update
+                                    acc
+                                    :parts
+                                    conj
+                                    {:text (:thinking b) :thought true :thoughtSignature sig})))
+                    (if-let [part (canonical-block->gemini-part b id->name)]
+                      {:parts (conj parts
+                                    (cond-> part
+                                      pending
+                                      (assoc :thoughtSignature pending)))
+                       :pending nil}
+                      acc)))
+                {:parts [] :pending nil}
+                blocks)]
+    (cond-> parts
+      pending
+      (conj {:text "" :thoughtSignature pending}))))
 
 (defn- gemini-contents
   "Canonical messages → `[system-instruction contents]`. System messages fold
@@ -3595,14 +3647,17 @@
                          (some-> (:role %)
                                  name)))
              (keep (fn [{:keys [role content]}]
-                     (let [parts (canonical->gemini-parts (normalize-content content) id->name)]
-                       (when (seq parts)
-                         {:role (if (= "assistant"
-                                       (some-> role
-                                               name))
-                                  "model"
-                                  "user")
-                          :parts parts}))))
+                     (let [model?
+                           (= "assistant"
+                              (some-> role
+                                      name))
+
+                           parts
+                           (cond-> (canonical->gemini-parts (normalize-content content) id->name)
+                             model?
+                             with-gemini-call-signature)]
+
+                       (when (seq parts) {:role (if model? "model" "user") :parts parts}))))
              vec)]
 
     [(when-not (str/blank? sys) {:parts [{:text sys}]}) contents]))
@@ -3659,18 +3714,16 @@
 
 (defn- gemini-candidate-parts [response] (get-in response ["candidates" 0 "content" "parts"]))
 
-(defn- gemini-tool-calls
-  "Canonical tool calls from Gemini `functionCall` parts. Gemini emits no
-   call-id, so synthesize a unique one (name+index) for caller correlation;
-   the wire round-trip matches by name/order, not id."
-  [parts]
-  (->> parts
-       (keep-indexed (fn [idx p]
-                       (when-let [fc (get p "functionCall")]
-                         {:id (str "gemini-" (get fc "name") "-" idx)
-                          :name (get fc "name")
-                          :input (decode-tool-arguments (get fc "args"))})))
-       vec))
+(defn- gemini-tool-call
+  "Canonical tool call from the Gemini `functionCall` part at `idx`. The wire
+   `id` when present (Claude on Cloud Code sends one), else a unique name+index id."
+  [idx part]
+  (when-let [fc (get part "functionCall")]
+    {:id (or (non-blank-string (get fc "id")) (str "gemini-" (get fc "name") "-" idx))
+     :name (get fc "name")
+     :input (decode-tool-arguments (get fc "args"))}))
+
+(defn- gemini-tool-calls [parts] (vec (keep-indexed gemini-tool-call parts)))
 
 (defn- gemini-visible-text
   [parts]
@@ -3681,15 +3734,43 @@
        (remove str/blank?)
        (str/join "")))
 
+(defn- gemini-part->canonical-blocks
+  "Canonical blocks for the Gemini response part at `idx`, in wire order.
+   Gemini requires each `thoughtSignature` back on the same part, so a
+   signature is kept in a canonical thinking block: on a thought part it signs
+   that thinking; on another part it is a blank-thinking block placed just
+   before the block of that part. Cross-model replay then drops every Gemini
+   signature with the rest of the foreign thinking."
+  [idx part]
+  (let [sig
+        (non-blank-string (get part "thoughtSignature"))
+
+        text
+        (gemini-wire-part-text part)
+
+        signature-block
+        {:type "thinking" :thinking "" :thinking-signature sig}
+
+        block
+        (cond (get part "functionCall") (let [{:keys [id name input]} (gemini-tool-call idx part)]
+                                          {:type "tool_use" :id id :name name :input input})
+              (str/blank? text) nil
+              :else {:type "text" :text text})]
+
+    (cond (get part "thought") (when (or sig (not (str/blank? text)))
+                                 [(cond-> {:type "thinking" :thinking (or text "")}
+                                    sig
+                                    (assoc :thinking-signature sig))])
+          sig (cond-> [signature-block]
+                block
+                (conj block))
+          block [block]
+          :else nil)))
+
 (defn- gemini-canonical-assistant-message
-  [parts tool-calls]
-  (let [text
-        (gemini-visible-text parts)
-
-        msg
-        (when-not (str/blank? text) {:role "assistant" :content [{:type "text" :text text}]})]
-
-    (with-tool-use-blocks msg tool-calls)))
+  [parts]
+  (let [content (into [] (comp (map-indexed gemini-part->canonical-blocks) cat) parts)]
+    (when (seq content) {:role "assistant" :content content})))
 
 (defn- extract-gemini-response-data
   [envelope]
@@ -3713,7 +3794,7 @@
         (gemini-tool-calls parts)
 
         canonical-msg
-        (gemini-canonical-assistant-message parts tool-calls)]
+        (gemini-canonical-assistant-message parts)]
 
     (cond-> {:content (when-not (str/blank? text) text)
              :reasoning (when-not (str/blank? thoughts) thoughts)
@@ -5781,6 +5862,36 @@
        model
        (if stream? ":streamGenerateContent?alt=sse" ":generateContent")))
 
+(defn- gemini-call!
+  "Shared Gemini transport: `post!` returns the HTTP envelope; `unwrap` maps it
+   to the plain Gemini response. Fires one terminal chunk for `:on-chunk` and
+   turns a failure into an HTTP fault."
+  [post! unwrap {:keys [model base-url on-chunk]}]
+  (try (let [result (extract-gemini-response-data (unwrap (post!)))]
+         (when on-chunk
+           (on-chunk {:content (:content result)
+                      :reasoning (:reasoning result)
+                      :provider-state nil
+                      :api-usage (:api-usage result)
+                      :done? false}))
+         result)
+       (catch Exception e
+         (let [ex-data-map
+               (ex-data e)
+
+               response-body
+               (when (string? (:body ex-data-map)) (:body ex-data-map))
+
+               error-message
+               (http-error-message e)]
+
+           (anomaly/fault! error-message
+                           (cond-> (merge (dissoc ex-data-map :body)
+                                          {:type :svar.core/http-error
+                                           :llm-request {:model model :base-url base-url}})
+                             response-body
+                             (assoc :body (truncate-error-body response-body))))))))
+
 (defn gemini-completion
   "Low-level Google Gemini transport (native generateContent). Auth is the
    `x-goog-api-key` header. Returns the same normalized shape as
@@ -5792,44 +5903,155 @@
    streaming callers keep working; true `streamGenerateContent` SSE is a
    follow-up."
   [request-body
-   {:keys [api-key base-url model headers timeout-ms on-chunk]
-    :or {timeout-ms router/DEFAULT_TIMEOUT_MS}}]
+   {:keys [api-key base-url model headers timeout-ms]
+    :or {timeout-ms router/DEFAULT_TIMEOUT_MS}
+    :as opts}]
   (let [url
         (gemini-url base-url model false)
 
         http-headers
-        (merge {"x-goog-api-key" api-key "Content-Type" "application/json"} headers)
-
-        llm-request
-        {:model model :base-url base-url}]
+        (merge {"x-goog-api-key" api-key "Content-Type" "application/json"} headers)]
 
     (trove/log! {:level :info
                  :data (log-data {:model model :url url :timeout-ms timeout-ms})
                  :msg "gemini request dispatched"})
-    (try (let [result (extract-gemini-response-data
-                        (http-post! url request-body http-headers timeout-ms))]
-           (when on-chunk
-             (on-chunk {:content (:content result)
-                        :reasoning (:reasoning result)
-                        :provider-state nil
-                        :api-usage (:api-usage result)
-                        :done? false}))
-           result)
-         (catch Exception e
-           (let [ex-data-map
-                 (ex-data e)
+    (gemini-call! #(http-post! url request-body http-headers timeout-ms) identity opts)))
 
-                 response-body
-                 (when (string? (:body ex-data-map)) (:body ex-data-map))
+;; ---------------------------------------------------------------------------
+;; Google Cloud Code Assist wire (Antigravity) — Gemini body in an envelope
+;; ---------------------------------------------------------------------------
+;;
+;; `POST {base}/v1internal:generateContent` takes
+;; `{project model request requestType userAgent requestId}` where `request` is
+;; the native Gemini body, and answers `{"response" <Gemini response>}`. Auth is
+;; a Google OAuth Bearer token. The `project` is the account's managed Cloud
+;; Code project: `loadCodeAssist` names it, `onboardUser` provisions it.
 
-                 error-message
-                 (http-error-message e)]
+(def ^:private CLOUD_CODE_IDE_VERSION "2.24.0")
 
-             (anomaly/fault! error-message
-                             (cond-> (merge (dissoc ex-data-map :body)
-                                            {:type :svar.core/http-error :llm-request llm-request})
-                               response-body
-                               (assoc :body (truncate-error-body response-body)))))))))
+(def ^:private CLOUD_CODE_USER_AGENT
+  (str "antigravity/hub/"
+       CLOUD_CODE_IDE_VERSION
+       " (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)"))
+
+(def ^:private ^:const CLOUD_CODE_TIMEOUT_MS 30000)
+
+(def ^:private ^:const CLOUD_CODE_ONBOARD_ATTEMPTS 5)
+
+(def ^:private ^:const CLOUD_CODE_ONBOARD_DELAY_MS 2000)
+
+(defn- cloud-code-post!
+  "POST to `{base}/v1internal:{method}`; returns the HTTP envelope."
+  [base-url method body api-key headers timeout-ms]
+  (http-post! (str (str/replace base-url #"/+$" "") "/v1internal:" method)
+              body
+              (merge {"Authorization" (str "Bearer " api-key)
+                      "Content-Type" "application/json"
+                      "User-Agent" CLOUD_CODE_USER_AGENT}
+                     headers)
+              timeout-ms))
+
+(defn- cloud-code-project-id
+  "Project id from a `cloudaicompanionProject` value: a string or `{\"id\" ..}`."
+  [v]
+  (non-blank-string (if (map? v) (get v "id") v)))
+
+(defn- cloud-code-tier-id
+  "Tier to onboard with: the default allowed tier, the first allowed tier, the
+   current tier, then `free-tier`."
+  [load-response]
+  (let [tiers (get load-response "allowedTiers")]
+    (or (some #(when (get % "isDefault") (non-blank-string (get % "id"))) tiers)
+        (some #(non-blank-string (get % "id")) tiers)
+        (non-blank-string (get-in load-response ["currentTier" "id"]))
+        "free-tier")))
+
+(defn- cloud-code-onboard!
+  [base-url api-key headers tier-id]
+  (loop [attempt 1]
+    (let [response (:parsed (cloud-code-post! base-url
+                                              "onboardUser"
+                                              {:tier_id tier-id
+                                               :metadata {:ide_type "ANTIGRAVITY"
+                                                          :ide_version CLOUD_CODE_IDE_VERSION
+                                                          :ide_name "antigravity"}}
+                                              api-key
+                                              headers
+                                              CLOUD_CODE_TIMEOUT_MS))
+          project (when (get response "done")
+                    (cloud-code-project-id (get-in response
+                                                   ["response" "cloudaicompanionProject"])))]
+
+      (cond project project
+            (< attempt (long CLOUD_CODE_ONBOARD_ATTEMPTS))
+            (do (Thread/sleep (long CLOUD_CODE_ONBOARD_DELAY_MS)) (recur (inc attempt)))
+            :else nil))))
+
+(defonce ^:private cloud-code-projects (atom {}))
+
+(defn- cloud-code-project!
+  "The managed Cloud Code project of the account behind `api-key`, cached per
+   endpoint and token."
+  [base-url api-key headers]
+  (let [cache-key (sha256-hex (str base-url "\n" api-key))]
+    (or (get @cloud-code-projects cache-key)
+        (let [load-response (:parsed (cloud-code-post! base-url
+                                                       "loadCodeAssist"
+                                                       {:metadata {:ideType "ANTIGRAVITY"}}
+                                                       api-key
+                                                       headers
+                                                       CLOUD_CODE_TIMEOUT_MS))
+              project
+              (or
+                (cloud-code-project-id (get load-response "cloudaicompanionProject"))
+                (cloud-code-onboard! base-url api-key headers (cloud-code-tier-id load-response)))]
+
+          (when-not project
+            (anomaly/fault! "Cloud Code Assist has no project for this account"
+                            {:type :svar.core/http-error :llm-request {:base-url base-url}}))
+          ;; Access tokens rotate, so old keys are dead weight: reset, do not grow.
+          (swap! cloud-code-projects #(assoc (if (< (count %) 64) % {}) cache-key project))
+          project))))
+
+(defn cloud-code-completion
+  "Low-level Google Cloud Code Assist transport (Antigravity). Sends the native
+   Gemini `request-body` in the Cloud Code envelope with Bearer auth and returns
+   the same normalized shape as `gemini-completion`. Non-streaming."
+  [request-body
+   {:keys [api-key base-url model headers timeout-ms]
+    :or {timeout-ms router/DEFAULT_TIMEOUT_MS}
+    :as opts}]
+  (trove/log! {:level :info
+               :data (log-data {:model model :base-url base-url :timeout-ms timeout-ms})
+               :msg "cloud code request dispatched"})
+  (gemini-call! #(cloud-code-post! base-url
+                                   "generateContent"
+                                   {:project (cloud-code-project! base-url api-key headers)
+                                    :model model
+                                    :request request-body
+                                    :requestType "agent"
+                                    :userAgent "antigravity"
+                                    :requestId (str "agent-" (random-uuid))}
+                                   api-key
+                                   headers
+                                   timeout-ms)
+                (fn [envelope]
+                  (update envelope :parsed #(let [r (get % "response")] (if (map? r) r %))))
+                opts))
+
+(defn- cloud-code-models!
+  "Model list of `fetchAvailableModels` as `[{\"id\" ..} ..]`; the wire keys it by id."
+  [base-url api-key headers]
+  (let [response (:parsed (cloud-code-post! base-url
+                                            "fetchAvailableModels"
+                                            {:project
+                                             (cloud-code-project! base-url api-key headers)}
+                                            api-key
+                                            headers
+                                            CLOUD_CODE_TIMEOUT_MS))]
+    (mapv (fn [[id m]]
+            (assoc (if (map? m) m {}) "id" id))
+          (get response "models"))))
 
 (defn- chat-completion-with-retry
   "Calls the LLM API with the direct-call transient retry policy."
@@ -7713,6 +7935,14 @@
                                   :headers llm-headers
                                   :timeout-ms timeout-ms
                                   :on-chunk on-chunk})
+         (= api-style :cloud-code) (cloud-code-completion
+                                     (build-gemini-request-body messages model extra-body)
+                                     {:api-key api-key
+                                      :base-url base-url
+                                      :model model
+                                      :headers llm-headers
+                                      :timeout-ms timeout-ms
+                                      :on-chunk on-chunk})
          (= api-style :openai-compatible-responses)
          (let [responses-call
                (fn [build-opts]
@@ -8137,10 +8367,12 @@
   (when (and (integer? value) (pos? (compare value 0)) (not (pos? (compare value Long/MAX_VALUE))))
     (long value)))
 
-(defn- require-copilot-model-limits!
-  "Reject missing or contradictory Copilot budgets before the unknown-model fallback is used."
+(defn- require-live-model-limits!
+  "Reject missing or contradictory budgets of a provider whose live model list is the
+   source of its limits (`:live-model-limits?`), before the unknown-model fallback is used.
+   The caller then refreshes the model catalog."
   [provider {:keys [name context input-limit output-limit] :as model}]
-  (when (= :github-copilot (:id provider))
+  (when (:live-model-limits? (router/known-provider (:id provider)))
     (let [invalid?
           (or (some #(and (some? %) (nil? (positive-token-limit %)))
                     (vals (select-keys model [:context :input-limit :output-limit])))
@@ -8153,7 +8385,10 @@
 
       (when reason
         (anomaly/incorrect!
-          (str "GitHub Copilot model metadata is missing or invalid for "
+          (str "Model metadata is missing or invalid for "
+               (some-> (:id provider)
+                       clojure.core/name)
+               "/"
                name
                ". Refresh the model catalog or configure verified input/context limits.")
           {:type :svar.llm/model-metadata-unavailable
@@ -8161,7 +8396,7 @@
            :model name
            :reason reason})))))
 
-(defn- inject-routed-params
+(defn- routed-params
   "Injects router-chosen `[provider model-map]` + caller opts into the opts map
    destined for a `*!*` primitive. Centralises the reasoning translation so
    every routed entrypoint gets the same treatment:
@@ -8195,7 +8430,6 @@
    - routed primitives carry `:router-handles-transients?`, making the router
      the sole owner of retry schedule, budget, telemetry, and fallback."
   [opts provider model-map]
-  (require-copilot-model-limits! provider model-map)
   (let [auto-params
         {:max_tokens (router/model-output-budget model-map)}
 
@@ -8287,6 +8521,12 @@
           merged-headers
           (assoc :llm-headers merged-headers)))))
 
+(defn- inject-routed-params
+  "[[routed-params]] for a request: first reject missing live model limits."
+  [opts provider model-map]
+  (require-live-model-limits! provider model-map)
+  (routed-params opts provider model-map))
+
 (defn prompt-cache-context
   "Returns an opaque deterministic identity for the exact provider cache namespace
    and fixed prefix selected by `router` + `opts`:
@@ -8310,7 +8550,7 @@
         (prepare-llm-opts (:messages opts) opts)
 
         routed-opts
-        (-> (inject-routed-params cache-opts provider model-map)
+        (-> (routed-params cache-opts provider model-map)
             apply-known-tool-quirk)]
 
     (prompt-cache-context-for-opts routed-opts)))
@@ -11266,6 +11506,29 @@
         api-style
         (assoc :api-style api-style)))))
 
+(defn- enrich-cloud-code-model
+  "Map Cloud Code `fetchAvailableModels` fields onto svar model keys. Its model ids
+   carry a level suffix (`-high`, `-medium`), so the catalog does not know them and
+   this entry is the only source of their limits."
+  [m]
+  (if-not (map? m)
+    m
+    (cond-> m
+      (positive-token-limit (get m "maxTokens"))
+      (assoc :context (positive-token-limit (get m "maxTokens")))
+
+      (positive-token-limit (get m "maxOutputTokens"))
+      (assoc :output-limit (positive-token-limit (get m "maxOutputTokens")))
+
+      (boolean? (get m "supportsImages"))
+      (assoc :vision? (get m "supportsImages"))
+
+      (boolean? (get m "supportsThinking"))
+      (assoc :reasoning? (get m "supportsThinking"))
+
+      (string? (get m "displayName"))
+      (assoc :name (get m "displayName")))))
+
 (defn- shape-models
   "Apply provider-specific model normalization keyed by `:models-shape`, then the
    provider-agnostic gateway enrichment."
@@ -11274,6 +11537,9 @@
         (case models-shape
           :lmstudio
           (mapv enrich-lmstudio-model models)
+
+          :cloud-code
+          (mapv enrich-cloud-code-model models)
 
           :github-copilot
           (mapv enrich-copilot-model models)
@@ -11451,7 +11717,9 @@
            (try
              ;; Retried: a shared gateway's 502/timeout must not be
              ;; reported to the caller as \"this endpoint has no models\".
-             (with-retry #(http-get! models-url api-key http-opts)
+             (with-retry #(if (= api-style :cloud-code)
+                            (cloud-code-models! base-url api-key llm-headers)
+                            (http-get! models-url api-key http-opts))
                          {:max-retries 3 :initial-delay-ms 500 :max-delay-ms 5000})
              (catch clojure.lang.ExceptionInfo ex
                (when strict? (throw ex))

@@ -240,6 +240,23 @@
             (svar/prompt-cache-context router opts))]
 
       (expect (= unrestricted restricted))))
+  ;; Regression: Vis asks for the cache identity before it loads the live model
+  ;; list, so a provider whose limits come from that list failed every first turn.
+  (it "identifies a live-limits model before its limits are known"
+      (let [router
+            (svar/make-router [{:id :antigravity
+                                :api-key "secret"
+                                :base-url "https://daily-cloudcode-pa.googleapis.com"
+                                :api-style :cloud-code
+                                :models [{:name "gemini-3.8-flash-medium"}]}])
+
+            opts
+            {:routing {:provider :antigravity :model "gemini-3.8-flash-medium"}}]
+
+        (expect (string? (:id (svar/prompt-cache-context router opts))))
+        (expect (= :svar.llm/model-metadata-unavailable
+                   (:type (ex-data (try (svar/context-budget router opts)
+                                        (catch clojure.lang.ExceptionInfo e e))))))))
   ;; Regression: Codex learned a tool-schema repair in one process, persisted
   ;; the repaired cache identity, then a fresh process preflighted the unrepaired
   ;; schema and refused an otherwise exact prompt prefix.

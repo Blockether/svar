@@ -3,6 +3,7 @@
    injection, response tool_use extraction, and the anthropic round-trip."
   (:require [babashka.http-client :as http]
             [charred.api :as json]
+            [clojure.string :as str]
             [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.internal.llm :as sut]))
 
@@ -868,7 +869,7 @@
               last-user
               (last (:contents body))]
 
-          (expect (= {:name "run_python" :args {:code "print(1)"}}
+          (expect (= {:name "run_python" :args {:code "print(1)"} :id "gemini-run_python-0"}
                      (:functionCall (first (:parts model-msg)))))
           (expect (= "run_python" (get-in (first (:parts last-user)) [:functionResponse :name])))
           ;; Gemini 3 requires `{:output v}` for success (the legacy `{:result v}`
@@ -894,6 +895,88 @@
 
           (expect (= {:error "No such file"}
                      (get-in (first (:parts last-user)) [:functionResponse :response])))))))
+
+(defdescribe
+  gemini-thought-signature-test
+  (it "replays each thoughtSignature on the part that carried it"
+      (let [msg
+            (:assistant-message
+              (extract-gemini {:parsed
+                               {"candidates"
+                                [{"content"
+                                  {"role" "model"
+                                   "parts"
+                                   [{"text" "plan" "thought" true "thoughtSignature" "sig-thought"}
+                                    {"functionCall" {"name" "cat" "args" {"path" "a"}}
+                                     "thoughtSignature" "sig-call"}
+                                    {"text" "" "thoughtSignature" "sig-end"}]}}]}}))
+
+            body
+            (build-gemini [{:role "user" :content "go"} msg] "gemini-3-pro" {})]
+
+        (expect (= [{:text "plan" :thought true :thoughtSignature "sig-thought"}
+                    {:functionCall {:name "cat" :args {"path" "a"} :id "gemini-cat-1"}
+                     :thoughtSignature "sig-call"} {:text "" :thoughtSignature "sig-end"}]
+                   (:parts (second (:contents body)))))))
+  (it "keeps the wire call id, which Claude on Cloud Code requires on replay"
+      (let [msg
+            (:assistant-message
+              (extract-gemini
+                {:parsed {"candidates" [{"content"
+                                         {"parts" [{"functionCall"
+                                                    {"name" "cat" "args" {} "id" "toolu_1"}}]}}]}}))
+
+            body
+            (build-gemini [{:role "user" :content "go"} msg
+                           {:role "user"
+                            :content [{:type "tool_result" :tool_use_id "toolu_1" :content "x"}]}]
+                          "claude-opus-4-6-thinking"
+                          {})]
+
+        (expect (= "toolu_1" (get-in body [:contents 1 :parts 0 :functionCall :id])))
+        (expect (= "toolu_1" (get-in body [:contents 2 :parts 0 :functionResponse :id])))))
+  (it "gives an unsigned function call the documented skip signature"
+      (let [body (build-gemini [{:role "user" :content "go"}
+                                {:role "assistant"
+                                 :content [{:type "text" :text "ok"}
+                                           {:type "tool_use" :id "x" :name "cat" :input {}}]}]
+                               "gemini-3-pro"
+                               {})]
+        (expect (= "skip_thought_signature_validator"
+                   (get-in body [:contents 1 :parts 1 :thoughtSignature]))))))
+
+(defdescribe
+  cloud-code-wire-test
+  (it "wraps the Gemini body in the Cloud Code envelope and unwraps the response"
+      (let [calls
+            (atom [])
+
+            post!
+            (fn [url body headers _timeout-ms]
+              (swap! calls conj {:url url :body body :auth (get headers "Authorization")})
+              (if (str/ends-with? url ":loadCodeAssist")
+                {:parsed {"cloudaicompanionProject" {"id" "proj-1"}}}
+                {:parsed {"response" {"candidates" [{"content" {"parts" [{"text" "hi"}]}}]}}}))
+
+            call!
+            #(sut/cloud-code-completion {:contents [{:role "user" :parts [{:text "hi"}]}]}
+                                        {:api-key "tok-cloud-code-test"
+                                         :base-url "https://cloudcode.test"
+                                         :model "gemini-3-flash"})
+
+            results
+            (with-redefs-fn {#'sut/http-post! post!} #(vector (call!) (call!)))
+
+            generate
+            (filter #(str/ends-with? (:url %) ":generateContent") @calls)]
+
+        (expect (= ["hi" "hi"] (mapv :content results)))
+        (expect (= 1 (count (filter #(str/ends-with? (:url %) ":loadCodeAssist") @calls))))
+        (expect (= {:project "proj-1"
+                    :model "gemini-3-flash"
+                    :request {:contents [{:role "user" :parts [{:text "hi"}]}]}}
+                   (select-keys (:body (first generate)) [:project :model :request])))
+        (expect (= "Bearer tok-cloud-code-test" (:auth (first generate)))))))
 
 (defdescribe
   anthropic-round-trip-test
