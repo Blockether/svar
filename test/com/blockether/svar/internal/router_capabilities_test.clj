@@ -218,16 +218,13 @@
         (expect (nil? (:verbosity-style info))))))
 
 (defdescribe
-  provider-fast-mode-test
-  (it "puts the tier only on listed providers that declare fast mode"
-      (let [router
-            {:providers [{:id :openai-codex :extra-body {:store false}} {:id :anthropic}
-                         {:id :openai-codex-backup}]}
-
-            fast
-            (router/fast-mode-router router [:openai-codex :anthropic])]
-
-        (expect (= {:store false :service_tier "priority"} (:extra-body (first (:providers fast)))))
-        (expect (= [{:id :anthropic} {:id :openai-codex-backup}] (rest (:providers fast))))
-        (expect (identical? router (router/fast-mode-router router [:anthropic])))
-        (expect (identical? router (router/fast-mode-router router []))))))
+  provider-fast-modes-test
+  (it "puts the selected tier only on providers that declare that mode"
+      (let [router {:providers [{:id :openai-codex :extra-body {:store false}} {:id :anthropic}
+                                {:id :openai-codex-backup}]}]
+        (doseq [[mode tier] [["fast" "priority"] ["ultrafast" "ultrafast"]]]
+          (let [routed (router/fast-mode-router router {:openai-codex mode :anthropic mode})]
+            (expect (= {:store false :service_tier tier} (:extra-body (first (:providers routed)))))
+            (expect (= (rest (:providers router)) (rest (:providers routed))))))
+        (expect (identical? router (router/fast-mode-router router {:openai-codex "normal"})))
+        (expect (identical? router (router/fast-mode-router router {}))))))

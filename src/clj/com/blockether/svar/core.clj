@@ -104,14 +104,14 @@
    conversation; the others take `place-prompt-cache-breakpoints`."
   router/provider-prompt-cache)
 
-(def provider-fast-mode
-  "Fast mode svar knows for a provider id (plan-tier aware), or nil:
-   `{:service-tier tier :cost-multiplier n}`."
-  router/provider-fast-mode)
+(def provider-fast-modes
+  "Fast modes for a provider id, in display order, or nil. Each mode has a
+   `:service-tier` and a `:cost-multiplier`. Plan tiers inherit these modes."
+  router/provider-fast-modes)
 
 (def fast-mode-router
-  "Put the fast service tier only on the router entries of the listed provider ids
-   that declare fast mode, so a fallback provider never carries it."
+  "Apply the selected mode in `modes-by-provider` (provider id to mode name).
+   Leave entries unchanged if no mode is selected or supported."
   router/fast-mode-router)
 
 (def provider-default-models

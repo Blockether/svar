@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Add the `ultrafast` service tier for OpenAI Codex. Use `provider-fast-modes`
+  to list the modes and pass a map of provider IDs to mode names to `fast-mode-router`.
+
 ## [v0.7.249] - 2026-11-25
 
 ### Changed

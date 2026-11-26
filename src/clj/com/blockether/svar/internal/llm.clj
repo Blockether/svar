@@ -1999,11 +1999,10 @@
          max-tokens
          (or (:max_tokens extra-body) 4096)
 
-         ;; Drop OpenAI-only fields. Priority is Codex-only; Anthropic's auto and
-         ;; standard_only remain.
+         ;; Drop OpenAI-only fields. Keep Anthropic's auto and standard_only.
          anthropic-extra
          (cond-> (dissoc extra-body :stream_options :prompt_cache_key :text)
-           (= "priority" (:service_tier extra-body))
+           (contains? #{"priority" "ultrafast"} (:service_tier extra-body))
            (dissoc :service_tier))
 
          body

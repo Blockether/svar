@@ -644,12 +644,13 @@
 (defdescribe anthropic-extra-body-sanitization-test
              ;; Regression, Vis session b30f87ac-f20e-4d7f-9fd2-416788d10527:
              ;; Codex Priority leaked into an Anthropic fallback request.
-             (it "strips Codex Priority while preserving Anthropic service tiers"
+             (it "strips Codex tiers while preserving Anthropic service tiers"
                  (let [body #(#'sut/build-anthropic-request-body
                                [{:role "user" :content "hi"}]
                                "claude-haiku-4-5"
                                {:service_tier % :temperature 0.3})]
                    (expect (not (contains? (body "priority") :service_tier)))
+                   (expect (not (contains? (body "ultrafast") :service_tier)))
                    (expect (= "auto" (:service_tier (body "auto"))))
                    (expect (= "standard_only" (:service_tier (body "standard_only"))))
                    (expect (= 0.3 (:temperature (body "priority"))))))

@@ -160,9 +160,8 @@
                   ;; The Responses WebSocket keeps the conversation on the server, so a
                   ;; caller continues one `open-session` instead of placing breakpoints.
                   :prompt-cache {:strategy :server-continuation :ttl :5m}
-                  ;; Fast mode is Priority processing, billed at 2x Standard for input,
-                  ;; cached input, cache writes and output.
-                  :fast-mode {:service-tier "priority" :cost-multiplier 2.0}
+                  :fast-modes {"fast" {:service-tier "priority" :cost-multiplier 2.0}
+                               "ultrafast" {:service-tier "ultrafast" :cost-multiplier 6.0}}
                   :default-models [{:name "gpt-6.2-sol"} {:name "gpt-6.2-astra"}]
                   ;; ChatGPT (Codex) serves GPT-6.2+ only: older models are retired.
                   :min-gpt-version [6 2]
@@ -2380,13 +2379,13 @@
   (let [policy (merge DEFAULT_PROMPT_CACHE (known-provider-policy provider-id :prompt-cache))]
     (assoc policy :ttl-ms (get PROMPT_CACHE_TTL_MS (:ttl policy)))))
 
-(defn provider-fast-mode
-  "Fast mode svar knows for `provider-id`, with plan-tier `:provider-model-source`
-   inheritance, or nil. `:service-tier` is the request `service_tier` value and
-   `:cost-multiplier` scales every billed token class of a request on that tier.
+(defn provider-fast-modes
+  "Map of fast modes for `provider-id`, in display order, or nil. Plan tiers
+   inherit the modes of their `:provider-model-source`. Each mode has a request
+   `:service-tier` and a `:cost-multiplier` for all billed token classes.
    `provider-id` is a keyword or a string."
   [provider-id]
-  (known-provider-policy provider-id :fast-mode))
+  (known-provider-policy provider-id :fast-modes))
 
 (defn server-fallbacks-wire
   "The Anthropic `fallbacks` body value for a request to `model-name` on `provider-id`,
@@ -2415,18 +2414,11 @@
                          fallbacks))))))
 
 (defn fast-mode-router
-  "Put the fast service tier on the router entry of each provider in `provider-ids`
-   that declares fast mode. Other entries stay unchanged, so a fallback to another
-   provider never carries the tier."
-  [router provider-ids]
-  (let [ids
-        (set provider-ids)
-
-        tier-for
-        (fn [provider]
-          (when (contains? ids (:id provider))
-            (:service-tier (provider-fast-mode (:id provider)))))]
-
+  "Apply the mode in `modes-by-provider` to each router entry that supports it.
+   Leave all other entries unchanged so a fallback does not inherit the tier."
+  [router modes-by-provider]
+  (let [tier-for (fn [{:keys [id]}]
+                   (get-in (provider-fast-modes id) [(get modes-by-provider id) :service-tier]))]
     (if-not (some tier-for (:providers router))
       router
       (update router
