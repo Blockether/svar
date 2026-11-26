@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.250] - 2026-11-26
+
+### Changed
+- feat(router): add Codex ultrafast service mode
+- release: update version files for v0.7.249, bump to next dev version
+
+
 ### Changed
 - Add the `ultrafast` service tier for OpenAI Codex. Use `provider-fast-modes`
   to list the modes and pass a map of provider IDs to mode names to `fast-mode-router`.
@@ -3152,7 +3159,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.249...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.250...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -3434,3 +3441,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.247]: https://github.com/Blockether/svar/releases/tag/v0.7.247
 [v0.7.248]: https://github.com/Blockether/svar/releases/tag/v0.7.248
 [v0.7.249]: https://github.com/Blockether/svar/releases/tag/v0.7.249
+[v0.7.250]: https://github.com/Blockether/svar/releases/tag/v0.7.250
