@@ -1001,6 +1001,49 @@
             (expect (<= 30 (long (:max-gap-ms profile))))
             (expect (= 1 (:semantic-events profile)))
             (expect (= :pre-first-token (:max-gap-phase profile))))))
+    ;; Regression, vis session 0e8070d8: a turn waited 89 s for its first token and the
+    ;; profile could not tell an upstream that held the request before its headers from
+    ;; an open stream that sent nothing, and it carried no upstream id to report.
+    (it
+      "tells a wait for response headers from a silent open stream"
+      (let [stream
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\n"
+
+            run
+            (fn [{:keys [headers-delay-ms body-delay-ms]}]
+              (with-redefs [http/post (fn [_url _opts]
+                                        (Thread/sleep (long headers-delay-ms))
+                                        {:status 200
+                                         :headers {"request-id" "req_test"}
+                                         :body (let [delayed? (atom false)
+                                                     in (ByteArrayInputStream.
+                                                          (.getBytes ^String stream "UTF-8"))]
+
+                                                 (proxy [java.io.InputStream] []
+                                                   (read
+                                                     ([] (.read in))
+                                                     ([^bytes buf off len]
+                                                      (when (compare-and-set! delayed? false true)
+                                                        (Thread/sleep (long body-delay-ms)))
+                                                      (.read in buf (int off) (int len))))))})]
+                (get-in (sut/openai-responses-completion
+                          {:model "test-model"
+                           :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                          {:api-key "sk-test"
+                           :base-url "https://example.invalid/v1"
+                           :responses-path "/codex/responses"})
+                        [:stream-finalization :progress])))
+
+            held-upstream
+            (run {:headers-delay-ms 300 :body-delay-ms 0})
+
+            silent-stream
+            (run {:headers-delay-ms 0 :body-delay-ms 300})]
+
+        (expect (= "req_test" (:request-id held-upstream)))
+        (expect (<= 300 (long (:headers-ms held-upstream))))
+        (expect (> 150 (long (:headers-ms silent-stream))))
+        (expect (<= 300 (long (:ttft-ms silent-stream))))))
     (it
       "responses heartbeats cannot postpone the semantic deadline"
       (let

@@ -300,23 +300,21 @@
    for the exact failure instead of guessing from a timestamp."
   #"(?i)(?:request[ _-]?id[\"'\s:=]+)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
+(defn header-request-id
+  "Returns the upstream correlation id in a response header map, or nil."
+  [headers]
+  (let [header-id (when (map? headers)
+                    (some (fn [k]
+                            (get headers k))
+                          ["x-request-id" "X-Request-Id" "x-litellm-call-id" "request-id"
+                           :x-request-id :request-id]))]
+    (when (string? header-id) header-id)))
+
 (defn request-id
   "Extracts a correlation id from an exception's headers or body, or nil."
   [^Throwable e]
-  (let [data
-        (ex-data e)
-
-        headers
-        (:headers data)
-
-        header-id
-        (when (map? headers)
-          (some (fn [k]
-                  (get headers k))
-                ["x-request-id" "X-Request-Id" "x-litellm-call-id" "request-id" :x-request-id
-                 :request-id]))]
-
-    (or (when (string? header-id) header-id)
+  (let [data (ex-data e)]
+    (or (header-request-id (:headers data))
         (second (re-find REQUEST_ID_PATTERN (str (:body data) " " (ex-message e)))))))
 
 (declare google-retry-delay-ms codex-reset-delay-ms anthropic-reset-delay-ms)

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Add the `ultrafast` service tier for OpenAI Codex. Use `provider-fast-modes`
   to list the modes and pass a map of provider IDs to mode names to `fast-mode-router`.
+- The stream progress profile now records `:headers-ms`, the time until the
+  response headers arrived, and `:request-id`, the upstream request ID. Use them
+  to tell an upstream that holds a request from an open stream that sends nothing.
 
 ## [v0.7.249] - 2026-11-25
 

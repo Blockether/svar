@@ -7014,13 +7014,23 @@
         _
         (mark-connection-healthy! url)
 
+        ;; Time to response headers and the upstream request id go into every
+        ;; progress profile: a long silence before the first token is either the
+        ;; upstream holding the request before it answers, or an open stream that
+        ;; sends nothing. Only these two facts tell them apart.
+        headers-ms
+        (long (/ (- (System/nanoTime) request-start-ns) 1000000))
+
+        upstream-request-id
+        (failure/header-request-id (:headers response))
+
         _
         (trove/log! {:level :debug
                      :id ::stream-headers
                      :data (log-data {:url url
                                       :status (:status response)
-                                      :headers-elapsed-ms
-                                      (long (/ (- (System/nanoTime) request-start-ns) 1000000))})
+                                      :headers-elapsed-ms headers-ms
+                                      :request-id upstream-request-id})
                      :msg "stream headers received"})
 
         input-stream
@@ -7114,7 +7124,10 @@
         (:phase progress)
 
         progress-profile
-        (:profile progress)
+        (fn []
+          (assoc ((:profile progress))
+            :headers-ms headers-ms
+            :request-id upstream-request-id))
 
         idle-fired?
         (atom false)
