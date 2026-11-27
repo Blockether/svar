@@ -542,20 +542,25 @@
                       :reasoning_options
                       [{:type "effort" :values ["high" "max"] :min 1 :max 2 :ignored true}]}))))))
 
-(defdescribe provider-model-filter-test
-             "Provider-scoped model filters."
-             (it "filters OpenAI Codex GPT models below GPT-6.2"
-                 (let [provider (router/normalize-provider 0
-                                                           {:id :openai-codex
-                                                            :api-key "test"
-                                                            :models [{:name "gpt-5"}
-                                                                     {:name "gpt-5.1-codex"}
-                                                                     {:name "gpt-6.2-sol"}]})]
-                   (expect (= ["gpt-6.2-sol"] (mapv :name (:models provider))))
-                   (doseq [model ["gpt-6.2-sol" "gpt-6.2-astra"]]
-                     (expect (router/provider-model-visible? :openai-codex model) model))
-                   (doseq [model ["gpt-5.3-codex" "gpt-6-luna" "gpt-6.1-sol" "gpt-6.1-terra"]]
-                     (expect (not (router/provider-model-visible? :openai-codex model)) model)))))
+(defdescribe
+  provider-model-filter-test
+  "Provider-scoped model filters."
+  (it "filters OpenAI Codex GPT models below GPT-6.1"
+      (let [provider (router/normalize-provider 0
+                                                {:id :openai-codex
+                                                 :api-key "test"
+                                                 :models [{:name "gpt-5"} {:name "gpt-5.1-codex"}
+                                                          {:name "gpt-6.2-sol"}]})]
+        (expect (= ["gpt-6.2-sol"] (mapv :name (:models provider))))
+        (doseq [model ["gpt-6.2-sol" "gpt-6.2-astra"]]
+          (expect (router/provider-model-visible? :openai-codex model) model))
+        (doseq [model ["gpt-5.3-codex" "gpt-6-luna" "gpt-6.1-sol" "gpt-6.1-terra"]]
+          (expect (not (router/provider-model-visible? :openai-codex model)) model))))
+  (it "serves an explicit GPT-6.1 Sol choice on OpenAI Codex"
+      (expect (= "GPT-6.1 Sol"
+                 (:display-name (router/provider-model-entry :openai-codex "gpt-6.1-sol"))))
+      (doseq [model ["gpt-6-astra" "gpt-6-sol" "gpt-5.3-codex"]]
+        (expect (nil? (router/provider-model-entry :openai-codex model)) model))))
 
 (defdescribe
   anthropic-thinking-max-tokens-clamp-test

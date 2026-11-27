@@ -163,10 +163,12 @@
                   :fast-modes {"fast" {:service-tier "priority" :cost-multiplier 2.0}
                                "ultrafast" {:service-tier "ultrafast" :cost-multiplier 6.0}}
                   :default-models [{:name "gpt-6.2-sol"} {:name "gpt-6.2-astra"}]
-                  ;; ChatGPT (Codex) serves GPT-6.2+ only: older models are retired.
-                  :min-gpt-version [6 2]
+                  ;; ChatGPT (Codex) serves GPT-6.1+ only: older models are retired. Lists
+                  ;; still hide GPT-6.1 Sol as outdated, but an explicit choice uses it.
+                  :min-gpt-version [6 1]
                   :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1"
-                                    "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
+                                    "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
+                                    "gpt-6.1-terra"}
                   ;; Codex plan: pull retail OpenAI pricing for metering
                   ;; via internal/modelsdev (`:pricing-source` overlay).
                   :pricing-source :openai
@@ -1349,8 +1351,12 @@
    ;; `/codex/models` catalog gives a 500K `context_window` for 6.2 Sol and 272K for
    ;; 6.2 Astra (checked 2026-11-17). Ultra is a client-side subagent workflow, not an
    ;; effort this single-inference client implements. `:min-gpt-version` retires every
-   ;; older model; pricing flows from the shared GPT-6 rows.
-   {"gpt-6.2-sol" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6.2-sol")
+   ;; older model; pricing flows from the shared GPT-6 rows. 6.1 Sol keeps the 272K
+   ;; default of Codex's bundled catalog.
+   {"gpt-6.1-sol" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6.1-sol")
+                    :context 272000
+                    :input-limit 272000)
+    "gpt-6.2-sol" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6.2-sol")
                     :context 500000
                     :input-limit 500000)
     "gpt-6.2-astra" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6.2-astra")
